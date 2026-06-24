@@ -6,7 +6,6 @@
     "dependencies": [],
     "js": "index.js",
     "css": "style.css",
-    "server": "server.js",
     "author": "ST Community",
     "version": "2.0.0",
     "homePage": "https://github.com/Hati1004/Janitor-Enhanced-Import",
