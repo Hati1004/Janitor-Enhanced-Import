@@ -1,0 +1,18 @@
+{
+    "display_name": "JanitorAI Enhanced Importer",
+    "loading_order": 10,
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "ST Community",
+    "version": "2.0.0",
+    "homePage": "https://github.com/Hati1004/Janitor-Enhanced-Import",
+    "auto_update": false,
+    "minimum_client_version": "1.10.0",
+    "hooks": {
+        "enable": "onEnable",
+        "disable": "onDisable"
+    }
+}
