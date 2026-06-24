@@ -224,16 +224,20 @@ function init(router) {
 
     // C. 로어북 스크립트 조회
     // 실측 확인된 경로: https://janitorai.com/hampter/script/<scriptUuid>  (단수 'script', 'scripts' 아님)
-    async function fetchScriptLorebook(scriptUuid) {
+    // janitorCookie가 주어지면 Cookie 헤더로 같이 보내 로그인 세션이 필요한 경우를 시도한다.
+    async function fetchScriptLorebook(scriptUuid, janitorCookie) {
         const endpoints = [
             `https://janitorai.com/hampter/script/${scriptUuid}`,   // 실제 확인된 경로
             `https://janitorai.com/hampter/scripts/${scriptUuid}`,  // 구버전 추정 경로(폴백)
             `https://janitorai.com/api/v1/scripts/${scriptUuid}`,
             `https://janitorai.com/api/scripts/${scriptUuid}`,
         ];
+        const headers = { ...BROWSER_HEADERS };
+        if (janitorCookie) headers['Cookie'] = janitorCookie;
+
         for (const url of endpoints) {
             try {
-                const res = await fetch(url, { headers: BROWSER_HEADERS });
+                const res = await fetch(url, { headers });
                 if (!res.ok) { console.log(`[Janitor] 스크립트 조회 실패 ${url} → HTTP ${res.status}`); continue; }
                 const json = await res.json();
                 console.log(`[Janitor] ✅ 스크립트 응답 획득 (${url}), 키:`, Object.keys(json).join(', '));
@@ -282,12 +286,14 @@ function init(router) {
     }
 
     // E. 캐릭터 페이지 HTML 파싱 (보조 수단 — Next.js CSR 구조에서는 빈 결과가 흔함)
-    async function scrapeScriptUuids(characterPageUrl) {
+    //    janitorCookie가 있으면 로그인 상태로 요청 — JanitorAI는 비로그인시
+    //    캐릭터 콘텐츠 자체를 내려주지 않는 것으로 확인됨(성인인증 게이트).
+    async function scrapeScriptUuids(characterPageUrl, janitorCookie) {
         try {
-            const res = await fetch(characterPageUrl, {
-                headers: { ...BROWSER_HEADERS, 'Accept': 'text/html' }
-            });
-            if (!res.ok) return [];
+            const headers = { ...BROWSER_HEADERS, 'Accept': 'text/html' };
+            if (janitorCookie) headers['Cookie'] = janitorCookie;
+            const res = await fetch(characterPageUrl, { headers });
+            if (!res.ok) { console.log(`[Janitor] 캐릭터 페이지 조회 실패 HTTP ${res.status}`); return []; }
             const html = await res.text();
             const scriptPattern = /\/scripts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
             const uuids = new Set();
@@ -310,7 +316,7 @@ function init(router) {
     }
 
     // E. 메인: PNG + 로어북 조합
-    async function buildFinalPng(uuid, characterPageUrl) {
+    async function buildFinalPng(uuid, characterPageUrl, janitorCookie) {
         let card = null;
         let rawMeta = null;
         let avatarPngBuf = null;
@@ -393,7 +399,7 @@ function init(router) {
         if (card?.data) {
             for (const u of findScriptUuidsInObject(card.data)) scriptUuidSet.add(u);
         }
-        for (const u of await scrapeScriptUuids(characterPageUrl)) scriptUuidSet.add(u);
+        for (const u of await scrapeScriptUuids(characterPageUrl, janitorCookie)) scriptUuidSet.add(u);
 
         console.log(`[Janitor] 수집된 스크립트 UUID 후보 (${scriptUuidSet.size}개):`, [...scriptUuidSet]);
 
@@ -401,7 +407,7 @@ function init(router) {
         if (scriptUuidSet.size > 0) {
             const allEntries = [];
             for (const sid of scriptUuidSet) {
-                const scriptData = await fetchScriptLorebook(sid);
+                const scriptData = await fetchScriptLorebook(sid, janitorCookie);
                 if (!scriptData) continue;
                 // 다양한 응답 구조 처리
                 const entries = scriptData.entries    || scriptData.items      ||
