@@ -1,7 +1,7 @@
 // 위치: SillyTavern/plugins/janitor.js
 const fs   = require('fs');
 const path = require('path');
-const info = { id: 'janitor', name: 'JanitorAI Proxy', description: 'JannyAI 우회 추출 백엔드' };
+const info = { id: 'janitor', name: 'JanitorAI Proxy', description: 'JanitorAI 본진 직접 추출 백엔드' };
 
 // ── CRC32 ────────────────────────────────────────────────────────
 const CRC_TABLE = (() => {
@@ -19,7 +19,6 @@ function crc32(buf) {
     return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
-// ── PNG 청크 처리 ────────────────────────────────────────────────
 function makeTEXtChunk(keyword, text) {
     const typeTag = Buffer.from('tEXt');
     const data    = Buffer.concat([Buffer.from(keyword, 'latin1'), Buffer.from([0x00]), Buffer.from(text, 'latin1')]);
@@ -85,13 +84,15 @@ function readCharaCard(pngBuf) {
 
 function toV2Card(card) {
     if (!card) return null;
-    if ((card.spec === 'chara_card_v2' || card.spec_version === '2.0') && card.data && 'first_mes' in card.data) return card;
-
     const d = card.data || {};
     const pick = (...vals) => {
         for (const v of vals) if (v !== undefined && v !== null) return v;
         return undefined;
     };
+
+    // 다중 인사말 강제 추출 및 정규화 (배열 내부가 객체일 경우 텍스트만 뽑아냄)
+    let rawAg = pick(d.alternate_greetings, card.alternate_greetings, d.altGreetings, card.altGreetings, d.alternateGreetings, card.alternateGreetings) || [];
+    const safeAg = (Array.isArray(rawAg) ? rawAg : []).map(ag => typeof ag === 'string' ? ag : (ag.text || ag.greeting || String(ag))).filter(Boolean);
 
     const v2 = {
         spec: 'chara_card_v2',
@@ -101,7 +102,7 @@ function toV2Card(card) {
             description:                pick(d.description, card.description, d.rawDescription, card.rawDescription) || '',
             personality:                pick(d.personality, card.personality)                                       || '',
             scenario:                   pick(d.scenario, card.scenario)                                             || '',
-            first_mes:                  pick(d.first_mes, card.first_mes, d.firstMessage, card.firstMessage) || '',
+            first_mes:                  pick(d.first_mes, card.first_mes, d.firstMessage, card.firstMessage, d.first_message, card.first_message) || '',
             mes_example:                pick(d.mes_example, card.mes_example, d.exampleDialogs, card.exampleDialogs) || '',
             creator_notes:              pick(d.creator_notes, card.creatorcomment, d.creatorNotes, card.creatorNotes) || '',
             system_prompt:              pick(d.system_prompt, card.systemPrompt)                                     || '',
@@ -109,7 +110,7 @@ function toV2Card(card) {
             tags:                       pick(d.tags, card.tags, d.customTags, card.customTags)                      || [],
             creator:                    pick(d.creator, card.creator, d.creatorName, card.creatorName)              || '',
             character_version:          pick(d.character_version, card.characterVersion)                            || '',
-            alternate_greetings:        pick(d.alternate_greetings, card.alternate_greetings, d.altGreetings, card.altGreetings, d.alternateGreetings, card.alternateGreetings) || [],
+            alternate_greetings:        safeAg,
             character_book:             pick(d.character_book, card.character_book)                                 || null,
             extensions:                 pick(d.extensions, card.extensions)                                         || {},
         }
@@ -137,25 +138,18 @@ function buildCharacterBook(entries) {
 }
 
 const BROWSER_HEADERS = {
-    'User-Agent':         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Accept':             'application/json, text/plain, */*',
-    'Origin':             'https://janitorai.com',
-    'Referer':            'https://janitorai.com/',
-};
-
-const DATACAT_HEADERS = {
-    'User-Agent':         BROWSER_HEADERS['User-Agent'],
-    'Accept':             'application/json, text/plain, */*',
-    'Origin':             'https://datacat.run',
-    'Referer':            'https://datacat.run/',
-    'Sec-Fetch-Site':     'same-origin',
-    'Sec-Fetch-Mode':     'cors',
-    'Sec-Fetch-Dest':     'empty'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none'
 };
 
 function init(router) {
     console.log("================================================");
-    console.log("[Janitor 플러그인] 🟢 쿠키 우회 통신 모듈 로드 완료!");
+    console.log("[Janitor 플러그인] 🟢 JanitorAI 본진 직접 추출 모듈 로드 완료!");
     console.log("================================================");
 
     async function tryJannyApi(uuid) {
@@ -165,184 +159,110 @@ function init(router) {
         if (!res.ok) throw new Error(`JannyAI HTTP ${res.status}`);
         const data = await res.json();
         if (!data.downloadUrl) throw new Error('downloadUrl 없음');
-        return { downloadUrl: data.downloadUrl, raw: data };
+        return data;
     }
 
-    // [핵심 변경점] 사용자가 전달한 쿠키를 헤더에 직접 삽입
-    async function tryDatacatCore(uuid, userCookie) {
-        const url = `https://datacat.run/api/characters/${uuid}?view=modal&sourceKind=janitor`;
-        const headers = { ...DATACAT_HEADERS };
+    // ── 핵심: JanitorAI 본진 HTML 통째로 뜯기 (데이터캣 우회) ──
+    async function tryJanitorDirect(uuid, userCookie) {
+        const headers = { ...BROWSER_HEADERS };
         if (userCookie) {
             headers['Cookie'] = userCookie;
-            console.log(`[Janitor] 사용자 제공 쿠키를 사용하여 Datacat 인증 우회 시도...`);
+            console.log(`[Janitor] 사용자 쿠키(Cloudflare 패스)를 장착하고 JanitorAI 본진으로 진입합니다...`);
+        } else {
+            console.log(`[Janitor] ⚠️ 쿠키가 없습니다. Cloudflare에 막힐 확률이 매우 높습니다.`);
         }
-        
-        const res = await fetch(url, { headers });
-        if (!res.ok) throw new Error(`datacat modal HTTP ${res.status}`);
-        const data = await res.json();
-        return { cardJson: data, raw: data };
-    }
 
-    async function scrapeNextDataFromHtml(url, headers, userCookie) {
+        let rawData = null;
+
+        // 1. JanitorAI API 직접 타격
         try {
-            const h = { ...headers, 'Accept': 'text/html' };
-            if (userCookie) h['Cookie'] = userCookie;
-
-            const res = await fetch(url, { headers: h });
-            if (!res.ok) return null;
-            const html = await res.text();
-            
-            const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-            if (!match) return null;
-            const nextData = JSON.parse(match[1]);
-
-            let charData = null;
-            let lorebooks = [];
-
-            function searchNode(obj) {
-                if (!obj || typeof obj !== 'object') return;
-                if (obj.name && (obj.first_message || obj.firstMessage || obj.description) && !charData) {
-                    if (obj.creator_id || obj.creatorId || obj.avatar) charData = obj;
+            const apiRes = await fetch(`https://janitorai.com/hampter/character/${uuid}`, { headers });
+            if (apiRes.ok) {
+                const json = await apiRes.json();
+                if (json && json.name) {
+                    console.log(`[Janitor] ✅ JanitorAI 공식 API 응답 획득 성공!`);
+                    rawData = json;
                 }
-                if (obj.entries && Array.isArray(obj.entries) && obj.entries.length > 0 && (obj.entries[0].keys || obj.entries[0].content)) {
-                    lorebooks.push(...obj.entries);
-                }
-                for (const k in obj) searchNode(obj[k]);
-            }
-            searchNode(nextData);
-
-            if (charData) {
-                if (lorebooks.length > 0) charData.character_book = { entries: lorebooks };
-                return charData;
             }
         } catch(e) {}
-        return null;
-    }
 
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    function findScriptUuidsInObject(obj, uuids = new Set(), seen = new WeakSet()) {
-        if (!obj || typeof obj !== 'object') return uuids;
-        if (seen.has(obj)) return uuids;
-        seen.add(obj);
-        const scriptKeyHints = ['script', 'scripts', 'lorebook', 'lorebooks', 'world_info'];
-        if (Array.isArray(obj)) {
-            for (const item of obj) findScriptUuidsInObject(item, uuids, seen);
-            return uuids;
-        }
-        for (const [k, v] of Object.entries(obj)) {
-            const keyLooksScripty = scriptKeyHints.some(h => k.toLowerCase().includes(h));
-            if (typeof v === 'string' && UUID_RE.test(v) && keyLooksScripty) uuids.add(v);
-            else if (Array.isArray(v) && keyLooksScripty) {
-                for (const item of v) {
-                    if (typeof item === 'string' && UUID_RE.test(item)) uuids.add(item);
-                    else if (item && typeof item === 'object') {
-                        const idVal = item.id || item.uuid || item.script_id;
-                        if (typeof idVal === 'string' && UUID_RE.test(idVal)) uuids.add(idVal);
-                        findScriptUuidsInObject(item, uuids, seen);
+        // 2. API가 막혔을 경우 HTML 렌더링 데이터 직접 파싱
+        if (!rawData) {
+            try {
+                console.log(`[Janitor] API 접근 실패. JanitorAI 페이지 HTML 직접 스크래핑 시도...`);
+                const htmlRes = await fetch(`https://janitorai.com/characters/${uuid}`, { headers });
+                if (htmlRes.ok) {
+                    const html = await htmlRes.text();
+                    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+                    if (match) {
+                        const nextData = JSON.parse(match[1]);
+                        let charObj = null;
+                        let lorebooks = [];
+
+                        // JSON 트리 전체를 뒤져서 캐릭터 객체와 로어북 뭉치를 발굴
+                        function searchTree(obj) {
+                            if (!obj || typeof obj !== 'object') return;
+                            if (obj.name && (obj.first_message || obj.firstMessage || obj.description)) {
+                                if (obj.id === uuid || obj.creator_id || obj.creatorId) if (!charObj) charObj = obj;
+                            }
+                            if (Array.isArray(obj.entries) && obj.entries.length > 0 && (obj.entries[0].keys || obj.entries[0].content)) {
+                                lorebooks.push(...obj.entries);
+                            } else if (Array.isArray(obj) && obj.length > 0 && (obj[0].keys || obj[0].content)) {
+                                lorebooks.push(...obj);
+                            }
+                            for (const key in obj) searchTree(obj[key]);
+                        }
+                        searchTree(nextData);
+
+                        if (charObj) {
+                            if (lorebooks.length > 0) charObj.character_book = { entries: lorebooks };
+                            rawData = charObj;
+                            console.log(`[Janitor] ✅ JanitorAI 본진 HTML 파싱 완벽 성공! (발견된 로어북 항목: ${lorebooks.length}개)`);
+                        }
                     }
                 }
-            } else if (v && typeof v === 'object') findScriptUuidsInObject(v, uuids, seen);
-        }
-        return uuids;
-    }
-
-    async function fetchScriptLorebook(scriptUuid, userCookie) {
-        const endpoints = [`https://janitorai.com/hampter/script/${scriptUuid}`, `https://janitorai.com/hampter/scripts/${scriptUuid}`];
-        const h = { ...BROWSER_HEADERS };
-        if (userCookie) h['Cookie'] = userCookie;
-
-        for (const url of endpoints) {
-            try {
-                const res = await fetch(url, { headers: h });
-                if (res.ok) return await res.json();
             } catch(e) {}
         }
-        return null;
+        return rawData;
     }
 
-    async function buildFinalPng(uuid, characterPageUrl, userCookie) {
-        let card = null;
-        let rawMeta = null;
+    async function buildFinalPng(uuid, userCookie) {
+        // 1. 이미지는 JannyAI에서 안전하게 다운로드 (이미지는 방어가 헐거움)
         let avatarPngBuf = null;
-
         try {
-            // 전달받은 쿠키를 삽입하여 Datacat 요청
-            const r = await tryDatacatCore(uuid, userCookie);
-            rawMeta = r.raw;
-            card = r.cardJson?.data ? r.cardJson : { spec: 'chara_card_v2', spec_version: '2.0', data: r.cardJson };
-            console.log(`[Janitor] ✅ 데이터캣 API 획득 성공 (쿠키 우회 작동됨)!`);
-        } catch (e0) {
-            console.log(`[Janitor] 데이터캣 API 실패, HTML 직접 스크래핑 우회 시도...`);
-            
-            const htmlData = await scrapeNextDataFromHtml(`https://datacat.run/characters/${uuid}`, DATACAT_HEADERS, userCookie) 
-                          || await scrapeNextDataFromHtml(characterPageUrl, BROWSER_HEADERS, userCookie);
-            
-            if (htmlData) {
-                rawMeta = htmlData;
-                card = { spec: 'chara_card_v2', spec_version: '2.0', data: htmlData };
-                console.log(`[Janitor] ✅ HTML 스크래핑 우회 성공!`);
-            } else {
-                console.log(`[Janitor] HTML 스크래핑도 실패, 부득이하게 JannyAI로 폴백...`);
-            }
-        }
-
-        let downloadUrl = null;
-        try {
-            const r = await tryJannyApi(uuid);
-            downloadUrl = r.downloadUrl;
-            if (!rawMeta) rawMeta = r.raw;
-        } catch (e1) {
-            try {
-                const res = await fetch(`https://datacat.run/retrieve?uuid=${uuid}`, { headers: DATACAT_HEADERS });
-                const json = await res.json();
-                downloadUrl = json.downloadUrl || json.url;
-            } catch (e2) {}
-        }
-
-        if (downloadUrl) {
-            const pngRes = await fetch(downloadUrl, { headers: BROWSER_HEADERS });
+            const jannyRes = await tryJannyApi(uuid);
+            const pngRes = await fetch(jannyRes.downloadUrl, { headers: BROWSER_HEADERS });
             if (pngRes.ok) avatarPngBuf = Buffer.from(await pngRes.arrayBuffer());
+        } catch(e) {}
+        if (!avatarPngBuf) throw new Error('캐릭터 이미지를 가져오는데 실패했습니다.');
+
+        // 2. 텍스트 데이터는 JanitorAI 본진에서 직접 추출 (다중 인사말, 로어북 타겟)
+        let charData = await tryJanitorDirect(uuid, userCookie);
+
+        // 3. 데이터 병합 및 V2 카드 생성
+        let card = toV2Card(charData);
+        if (!card) {
+            console.log(`[Janitor] ⚠️ JanitorAI 본진 털기 실패. 임베드 데이터로 폴백합니다.`);
+            card = readCharaCard(avatarPngBuf);
+            card = toV2Card(card);
+            if (!card) card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: uuid } };
         }
 
-        if (!avatarPngBuf) throw new Error('캐릭터의 원본 PNG 이미지를 가져오지 못했습니다.');
-
-        if (!card) card = readCharaCard(avatarPngBuf);
-        card = toV2Card(card);
-        if (!card) card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: uuid } };
-
-        let allEntries = [];
-        const scriptUuidSet = new Set();
-
-        if (rawMeta) {
-            const embeds = [rawMeta.lorebook, rawMeta.lorebooks, rawMeta.character_book, rawMeta.characterBook, card?.data?.character_book];
-            for (const pb of embeds) {
-                if (pb && Array.isArray(pb.entries)) allEntries.push(...pb.entries);
-                else if (Array.isArray(pb) && pb.length > 0 && (pb[0].keys || pb[0].content)) allEntries.push(...pb);
-            }
-            if (allEntries.length === 0) for (const u of findScriptUuidsInObject(rawMeta)) scriptUuidSet.add(u);
-        }
-
-        if (card?.data) for (const u of findScriptUuidsInObject(card.data)) scriptUuidSet.add(u);
-
-        if (allEntries.length === 0 && scriptUuidSet.size > 0) {
-            for (const sid of scriptUuidSet) {
-                const scriptData = await fetchScriptLorebook(sid, userCookie);
-                if (!scriptData) continue;
-                const entries = scriptData.entries || scriptData.items || scriptData.lorebook?.entries || scriptData.data?.entries || (Array.isArray(scriptData) ? scriptData : null);
-                if (entries && Array.isArray(entries)) allEntries.push(...entries);
-            }
-        }
-
-        if (allEntries.length > 0) {
-            card.data.character_book = buildCharacterBook(allEntries);
-            console.log(`[Janitor] ✅ 로어북 병합 완료 (총 항목 수: ${allEntries.length}개)`);
+        // 4. 로어북 확인 및 알림
+        if (card.data.character_book && card.data.character_book.entries) {
+            card.data.character_book = buildCharacterBook(card.data.character_book.entries);
+            console.log(`[Janitor] ✅ 로어북 병합 완료`);
         } else {
-            console.log('[Janitor] ℹ️ 이 캐릭터는 로어북이 없거나 비공개 설정되어 있습니다.');
+            console.log('[Janitor] ℹ️ 추출된 로어북 데이터가 없습니다.');
         }
 
-        const rawAg = card.data.alternate_greetings || [];
-        if (rawAg.length > 0) console.log(`[Janitor] ✅ 다중 인사말 ${rawAg.length}개 병합 완료!`);
+        if (card.data.alternate_greetings && card.data.alternate_greetings.length > 0) {
+            console.log(`[Janitor] ✅ 다중 인사말 ${card.data.alternate_greetings.length}개 병합 완료!`);
+        } else {
+            console.log(`[Janitor] ℹ️ 추출된 다중 인사말이 없습니다.`);
+        }
 
+        // 5. PNG 청크에 최종 데이터 덮어쓰기
         const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
         const pngBuf = rebuildPng(avatarPngBuf, { chara: newB64, ccv3: newB64 });
 
@@ -363,10 +283,9 @@ function init(router) {
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             
-            const { pngBuf, charName } = await buildFinalPng(m[0], url, cookie);
+            const { pngBuf, charName } = await buildFinalPng(m[0], cookie);
             res.json({ success: true, pngBase64: pngBuf.toString('base64'), charName });
         } catch (err) {
-            console.error('[Janitor 플러그인 에러]', err.message);
             res.status(500).json({ success: false, error: err.message });
         }
     });
@@ -378,7 +297,7 @@ function init(router) {
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             
-            const { pngBuf, charName } = await buildFinalPng(m[0], url, cookie);
+            const { pngBuf, charName } = await buildFinalPng(m[0], cookie);
             const charactersDir = req.user?.directories?.characters;
             
             if (!charactersDir) return res.status(500).json({ success: false, error: '캐릭터 폴더 경로를 찾을 수 없습니다.' });
@@ -390,7 +309,6 @@ function init(router) {
 
             res.json({ success: true, charName, fileName: path.basename(finalPath) });
         } catch (err) {
-            console.error('[Janitor 플러그인 에러]', err.message);
             res.status(500).json({ success: false, error: err.message });
         }
     });
