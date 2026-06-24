@@ -19,15 +19,13 @@ JanitorAI의 캐릭터 URL만 입력하면 서버 백엔드를 통해 캐릭터,
 2. 콘솔 창 로딩 중 **`[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!`** 라는 문구가 뜨는지 확인합니다.
 3. 브라우저에서 새로고침(F5)을 한 뒤, 확장 탭 상단에 추가된 추출기를 사용합니다!
 
-### 올바른 위치들
-~public/scripts/extensions/third-party/Janitor-Enhanced-Import 폴더 안에 `index.js`, `manifest.json`, `style.css`
-~GitHub/SillyTavern/plugins 폴더 안에 `janitor.js`
+
 
 ## ⚠️ 문제 해결 (Troubleshooting)
 
 ### 올바른 위치들
-~public/scripts/extensions/third-party/Janitor-Enhanced-Import 폴더 안에 `index.js`, `manifest.json`, `style.css`
-~GitHub/SillyTavern/plugins 폴더 안에 `janitor.js`
+* ~public/scripts/extensions/third-party/Janitor-Enhanced-Import 폴더 안에 `index.js`, `manifest.json`, `style.css`.
+* ~GitHub/SillyTavern/plugins 폴더 안에 `janitor.js`
 
 * **Q. 404 Not Found 에러가 뜹니다.**
   * A. `janitor.js`가 `plugins` 폴더에 제대로 들어가지 않았거나, `config.yaml`에서 플러그인 설정이 켜지지 않은 것입니다. 서버 창을 껐다 켜보세요.
