@@ -111,9 +111,8 @@ function readCharaCard(pngBuf) {
 }
 
 // ── V3 카드 → V2 카드 변환 (ST 1.18 호환) ───────────────────────
-// ST의 /api/characters/import는 spec_version 2.0만 받음
-// datacat core 응답은 camelCase 필드명(characterId, altGreetings, firstMessage 등)을
-// 쓰는 자체 포맷이므로, 표준 chara_card_v2가 아니면 항상 정규화를 거친다.
+// ST의 /api/characters/import는 spec_version 2.0만 받음.
+// JannyAI/datacat이 V3 스펙이나 camelCase 변형 필드를 줄 수 있어 항상 정규화한다.
 function toV2Card(card) {
     if (!card) return null;
     // 표준 chara_card_v2이면서 snake_case data 필드가 실제로 존재할 때만 그대로 반환
@@ -153,38 +152,6 @@ function toV2Card(card) {
     return v2;
 }
 
-// ── 로어북 항목 → V2 character_book 변환 ────────────────────────
-function buildCharacterBook(entries) {
-    if (!entries || !Array.isArray(entries) || entries.length === 0) return null;
-    return {
-        name: '',
-        description: '',
-        scan_depth: 2,
-        token_budget: 2048,
-        recursive_scanning: false,
-        extensions: {},
-        entries: entries.map((e, i) => {
-            const baseKeys = Array.isArray(e.keys)     ? e.keys     :
-                             Array.isArray(e.keywords) ? e.keywords :
-                             e.key ? [e.key] : [];
-            const triggerKeys = Array.isArray(e.triggers) ? e.triggers : [];
-            const mergedKeys = [...new Set([...baseKeys, ...triggerKeys])];
-            return {
-                keys:            mergedKeys,
-                secondary_keys:  [],
-                comment:         e.comment || e.name || e.title || '',
-                content:         e.content || e.value || e.text || '',
-                constant:        Boolean(e.constant),
-                selective:       Boolean(e.selective),
-                insertion_order: typeof e.insertion_order === 'number' ? e.insertion_order : i,
-                enabled:         e.enabled !== false,
-                position:        e.position || 'after_char',
-                extensions:      {}
-            };
-        })
-    };
-}
-
 // ── 공통 브라우저 헤더 ───────────────────────────────────────────
 const BROWSER_HEADERS = {
     'User-Agent':         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -219,155 +186,44 @@ function init(router) {
         return { downloadUrl: data.downloadUrl, raw: data };
     }
 
-    // B. datacat core 추출 (실측 확인됨) — JannyAI보다 데이터가 훨씬 완전함
-    //    이 엔드포인트는 PNG가 아니라 JSON을 반환하며, alternate_greetings와
-    //    scripts(로어북 UUID 목록) 필드가 함께 들어있는 것으로 확인됨.
-    async function tryDatacatCore(uuid) {
-        const url = `https://datacat.run/api/characters/${uuid}/download?t=${Date.now()}&variant=janitor_core&sourceKind=janitor`;
-        const res = await fetch(url, { headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' } });
-        if (!res.ok) throw new Error(`datacat core HTTP ${res.status}`);
-        const data = await res.json();
-        console.log('[Janitor][DEBUG] datacat core 원본 응답 키:', Object.keys(data).join(', '));
-        return { cardJson: data, raw: data };
-    }
-
-    // B-2. datacat 구버전 폴백 (uuid retrieve 방식 — 혹시 살아있을 경우용)
+    // B. datacat 익명 다운로드 경로
     async function tryDatacat(uuid) {
         const res = await fetch(`https://datacat.run/retrieve?uuid=${uuid}`, {
             headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' }
         });
         if (!res.ok) throw new Error(`datacat HTTP ${res.status}`);
         const data = await res.json();
-        console.log('[Janitor][DEBUG] datacat(구버전) 원본 응답 전체:', JSON.stringify(data));
+        console.log('[Janitor][DEBUG] datacat 원본 응답 전체:', JSON.stringify(data));
         const dlUrl = data.downloadUrl || data.url || data.download_url;
         if (!dlUrl) throw new Error('datacat URL 없음');
         return { downloadUrl: dlUrl, raw: data };
     }
 
-    // C. 로어북 스크립트 조회
-    // 실측 확인된 경로: https://janitorai.com/hampter/script/<scriptUuid>  (단수 'script', 'scripts' 아님)
-    async function fetchScriptLorebook(scriptUuid) {
-        const endpoints = [
-            `https://janitorai.com/hampter/script/${scriptUuid}`,   // 실제 확인된 경로
-            `https://janitorai.com/hampter/scripts/${scriptUuid}`,  // 구버전 추정 경로(폴백)
-            `https://janitorai.com/api/v1/scripts/${scriptUuid}`,
-            `https://janitorai.com/api/scripts/${scriptUuid}`,
-        ];
-        for (const url of endpoints) {
-            try {
-                const res = await fetch(url, { headers: BROWSER_HEADERS });
-                if (!res.ok) { console.log(`[Janitor] 스크립트 조회 실패 ${url} → HTTP ${res.status}`); continue; }
-                const json = await res.json();
-                console.log(`[Janitor] ✅ 스크립트 응답 획득 (${url}), 키:`, Object.keys(json).join(', '));
-                return json;
-            } catch(e) { console.log(`[Janitor] 스크립트 조회 에러 ${url}:`, e.message); }
-        }
-        return null;
-    }
-
-    // D. 임의의 JSON 객체를 재귀로 훑어 스크립트/로어북 UUID를 찾는다.
-    // JannyAI/datacat 응답이나 캐릭터 메타데이터 안에 scripts, lorebooks,
-    // attachedScripts 등의 키로 UUID 배열이 들어있는 경우를 폭넓게 커버한다.
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    function findScriptUuidsInObject(obj, uuids = new Set(), seen = new WeakSet()) {
-        if (!obj || typeof obj !== 'object') return uuids;
-        if (seen.has(obj)) return uuids;
-        seen.add(obj);
-
-        const scriptKeyHints = ['script', 'scripts', 'lorebook', 'lorebooks', 'world_info', 'worldinfo', 'attachedscripts'];
-
-        if (Array.isArray(obj)) {
-            for (const item of obj) findScriptUuidsInObject(item, uuids, seen);
-            return uuids;
-        }
-
-        for (const [k, v] of Object.entries(obj)) {
-            const keyLower = k.toLowerCase();
-            const keyLooksScripty = scriptKeyHints.some(h => keyLower.includes(h));
-
-            if (typeof v === 'string' && UUID_RE.test(v) && keyLooksScripty) {
-                uuids.add(v);
-            } else if (Array.isArray(v) && keyLooksScripty) {
-                for (const item of v) {
-                    if (typeof item === 'string' && UUID_RE.test(item)) uuids.add(item);
-                    else if (item && typeof item === 'object') {
-                        const idVal = item.id || item.uuid || item.script_id || item.scriptId;
-                        if (typeof idVal === 'string' && UUID_RE.test(idVal)) uuids.add(idVal);
-                        findScriptUuidsInObject(item, uuids, seen);
-                    }
-                }
-            } else if (v && typeof v === 'object') {
-                findScriptUuidsInObject(v, uuids, seen);
-            }
-        }
-        return uuids;
-    }
-
-    // E. 캐릭터 페이지 HTML 파싱 (보조 수단 — Next.js CSR 구조에서는 빈 결과가 흔함)
-    async function scrapeScriptUuids(characterPageUrl) {
-        try {
-            const headers = { ...BROWSER_HEADERS, 'Accept': 'text/html' };
-            const res = await fetch(characterPageUrl, { headers });
-            if (!res.ok) { console.log(`[Janitor] 캐릭터 페이지 조회 실패 HTTP ${res.status}`); return []; }
-            const html = await res.text();
-            const scriptPattern = /\/scripts\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
-            const uuids = new Set();
-            let m;
-            while ((m = scriptPattern.exec(html)) !== null) uuids.add(m[1]);
-
-            const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-            if (nextDataMatch) {
-                try {
-                    const nextData = JSON.parse(nextDataMatch[1]);
-                    for (const u of findScriptUuidsInObject(nextData)) uuids.add(u);
-                } catch(e) {}
-            }
-            if (uuids.size > 0) console.log(`[Janitor] 캐릭터 페이지 HTML에서 스크립트 UUID 발견:`, [...uuids]);
-            return [...uuids];
-        } catch(e) {
-            console.log('[Janitor] 페이지 스크래핑 실패:', e.message);
-            return [];
-        }
-    }
-
-    // E. 메인: PNG + 로어북 조합
+    // E. 메인: PNG 추출
+    // 참고: JanitorAI의 로어북(Scripts)과 datacat의 'core' 추출 경로는 모두
+    // 로그인 세션(Cloudflare 포함) 인증이 필요해 서버 단독으로는 접근할 수 없는 것이
+    // 실측으로 확인되어, 이 기능은 PNG(대체 인사말 포함) 추출에 집중한다.
     async function buildFinalPng(uuid, characterPageUrl) {
-        let card = null;
-        let rawMeta = null;
         let avatarPngBuf = null;
         let source = 'unknown';
 
-        // 1. 1순위: datacat core 추출 — 멀티그리팅과 scripts 필드가 가장 완전함 (실측 확인됨)
-        try {
-            const r = await tryDatacatCore(uuid);
-            rawMeta = r.raw;
-            source = 'datacat_core';
-            // datacat core 응답을 곧바로 V2 카드로 간주 (필요시 toV2Card가 정규화)
-            card = r.cardJson?.data ? r.cardJson : { spec: 'chara_card_v2', spec_version: '2.0', data: r.cardJson };
-            const rawAg = card.data?.alternate_greetings || [];
-            console.log(`[Janitor] ✅ datacat core 카드 획득. alternate_greetings 개수: ${rawAg.length}`);
-        } catch (e0) {
-            console.log(`[Janitor] datacat core 실패(${e0.message}), JannyAI로 폴백...`);
-        }
-
-        // 2. 아바타 PNG 베이스 이미지 확보 (JannyAI 우선, 실패시 구버전 datacat)
+        // PNG 베이스 이미지 확보: datacat(익명) → JannyAI 순으로 시도.
+        // 둘 다 캐시 데이터의 완전성이 캐릭터마다 달라, 실패한 쪽으로 자동 폴백한다.
         let downloadUrl = null;
         try {
-            const r = await tryJannyApi(uuid);
+            const r = await tryDatacat(uuid);
             downloadUrl = r.downloadUrl;
-            if (!rawMeta) rawMeta = r.raw; // datacat core가 실패했을 때만 이걸 메타데이터로 사용
-            if (source === 'unknown') source = 'janny';
-            console.log('[Janitor] ✅ JannyAI PNG URL 획득');
+            source = 'datacat';
+            console.log('[Janitor] ✅ datacat PNG URL 획득');
         } catch (e1) {
-            console.log(`[Janitor] JannyAI 실패(${e1.message}), datacat(구버전) 시도...`);
+            console.log(`[Janitor] datacat 실패(${e1.message}), JannyAI 시도...`);
             try {
-                const r = await tryDatacat(uuid);
+                const r = await tryJannyApi(uuid);
                 downloadUrl = r.downloadUrl;
-                if (!rawMeta) rawMeta = r.raw;
-                if (source === 'unknown') source = 'datacat_legacy';
-                console.log('[Janitor] ✅ datacat(구버전) PNG URL 획득');
+                source = 'janny';
+                console.log('[Janitor] ✅ JannyAI PNG URL 획득');
             } catch (e2) {
-                console.log(`[Janitor] datacat(구버전)도 실패(${e2.message})`);
+                console.log(`[Janitor] JannyAI도 실패(${e2.message})`);
             }
         }
 
@@ -375,7 +231,7 @@ function init(router) {
             const pngRes = await fetch(downloadUrl, { headers: BROWSER_HEADERS });
             if (pngRes.ok) {
                 avatarPngBuf = Buffer.from(await pngRes.arrayBuffer());
-                console.log(`[Janitor] ✅ 아바타 PNG ${avatarPngBuf.length} bytes`);
+                console.log(`[Janitor] ✅ 아바타 PNG ${avatarPngBuf.length} bytes (소스: ${source})`);
             } else {
                 console.log(`[Janitor] 아바타 PNG 다운로드 실패 HTTP ${pngRes.status}`);
             }
@@ -385,15 +241,13 @@ function init(router) {
             throw new Error('PNG 베이스 이미지를 어떤 소스에서도 가져오지 못했습니다.');
         }
 
-        // 3. card가 아직 없으면(= datacat core 실패) PNG 자체에 임베드된 카드를 읽어서 사용
-        if (!card) {
-            card = readCharaCard(avatarPngBuf);
-            if (card) {
-                const rawAg = card.data?.alternate_greetings || card.alternate_greetings || [];
-                console.log(`[Janitor][DEBUG] PNG 임베드 카드의 alternate_greetings 개수: ${rawAg.length}`);
-            } else {
-                console.log('[Janitor][DEBUG] PNG에 chara/ccv3 텍스트 청크 자체가 없음');
-            }
+        // PNG에 임베드된 카드 읽기 (chara/ccv3 중 더 완전한 쪽 자동 선택)
+        let card = readCharaCard(avatarPngBuf);
+        if (card) {
+            const rawAg = card.data?.alternate_greetings || card.alternate_greetings || [];
+            console.log(`[Janitor][DEBUG] PNG 임베드 카드의 alternate_greetings 개수: ${rawAg.length}`);
+        } else {
+            console.log('[Janitor][DEBUG] PNG에 chara/ccv3 텍스트 청크 자체가 없음');
         }
         card = toV2Card(card);
         if (!card) {
@@ -401,63 +255,13 @@ function init(router) {
         }
         console.log(`[Janitor] 카드 변환: spec=${card.spec} v=${card.spec_version} (소스: ${source})`);
 
-        let pngBuf = avatarPngBuf;
-
-        // 4. 로어북(스크립트) UUID 수집: 여러 소스를 모두 합쳐서 시도
-        //    - datacat core 응답의 raw scripts 필드 (가장 신뢰도 높음 — 실측 확인됨)
-        //    - 카드 데이터 자체
-        //    - 캐릭터 페이지 HTML 스크래핑 (보조 수단)
-        const scriptUuidSet = new Set();
-        if (rawMeta) {
-            for (const u of findScriptUuidsInObject(rawMeta)) scriptUuidSet.add(u);
-        }
-        if (card?.data) {
-            for (const u of findScriptUuidsInObject(card.data)) scriptUuidSet.add(u);
-        }
-        for (const u of await scrapeScriptUuids(characterPageUrl)) scriptUuidSet.add(u);
-
-        console.log(`[Janitor] 수집된 스크립트 UUID 후보 (${scriptUuidSet.size}개):`, [...scriptUuidSet]);
-
-        let lorebook = null;
-        if (scriptUuidSet.size > 0) {
-            const allEntries = [];
-            for (const sid of scriptUuidSet) {
-                const scriptData = await fetchScriptLorebook(sid);
-                if (!scriptData) continue;
-                // 다양한 응답 구조 처리
-                const entries = scriptData.entries    || scriptData.items      ||
-                                scriptData.lore_items || scriptData.lorebook?.entries ||
-                                scriptData.data?.entries ||
-                                (Array.isArray(scriptData) ? scriptData : null);
-                if (entries && Array.isArray(entries)) {
-                    allEntries.push(...entries);
-                    console.log(`[Janitor] 스크립트 ${sid}: 항목 ${entries.length}개`);
-                } else {
-                    console.log(`[Janitor] 스크립트 ${sid}: entries 필드를 찾지 못함. 응답 키:`, Object.keys(scriptData).join(', '));
-                }
-            }
-            if (allEntries.length > 0) {
-                lorebook = buildCharacterBook(allEntries);
-                console.log(`[Janitor] ✅ 로어북 총 ${allEntries.length}개 항목`);
-            }
-        }
-
-        // 5. 카드에 로어북 주입
-        if (lorebook) {
-            card.data.character_book = lorebook;
-        } else {
-            console.log('[Janitor] ℹ️ 로어북 없음 (비공개 or API 변경)');
-        }
-
-        // 6. V2 카드를 PNG에 임베드 (chara + ccv3 둘 다 교체하여 충돌 방지)
+        // V2 카드를 PNG에 다시 임베드 (chara + ccv3 둘 다 교체하여 충돌 방지)
         const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
-        // ccv3 청크도 같은 내용으로 덮어써서 ST가 혼동하지 않게 함
-        pngBuf = rebuildPng(pngBuf, { chara: newB64, ccv3: newB64 });
+        const pngBuf = rebuildPng(avatarPngBuf, { chara: newB64, ccv3: newB64 });
 
         return {
             pngBuf,
-            charName: card.data.name || uuid,
-            lorebookEntryCount: lorebook ? lorebook.entries.length : 0
+            charName: card.data.name || uuid
         };
     }
 
@@ -491,13 +295,12 @@ function init(router) {
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url);
 
             res.json({
                 success:   true,
                 pngBase64: pngBuf.toString('base64'),
-                charName:  charName,
-                lorebookEntryCount
+                charName:  charName
             });
 
         } catch (err) {
@@ -518,7 +321,7 @@ function init(router) {
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
@@ -545,123 +348,7 @@ function init(router) {
             res.json({
                 success:  true,
                 charName: charName,
-                fileName: path.basename(finalPath),
-                lorebookEntryCount
-            });
-
-        } catch (err) {
-            console.error('[Janitor 플러그인 에러]', err.message);
-            res.status(500).json({ success: false, error: err.message });
-        }
-    });
-
-    // ── 로어북 연동 라우트 ──────────────────────────────────────────
-    // datacat에서 받은 로어북 JSON(이미 ST World Info 포맷이거나 비슷한 구조)을
-    // 1) ST worlds 폴더에 World Info 파일로 저장
-    // 2) 해당 캐릭터 PNG의 data.extensions.world 필드를 갱신해 자동 연결
-    router.post('/attach-lorebook', async (req, res) => {
-        try {
-            const { charName, lorebookJson } = req.body;
-            if (!charName)     return res.status(400).json({ success: false, error: '캐릭터 이름이 필요합니다.' });
-            if (!lorebookJson) return res.status(400).json({ success: false, error: '로어북 JSON이 필요합니다.' });
-
-            const worldsDir     = req.user?.directories?.worlds;
-            const charactersDir = req.user?.directories?.characters;
-            if (!worldsDir || !charactersDir) {
-                return res.status(500).json({
-                    success: false,
-                    error: 'ST 폴더 경로를 찾을 수 없습니다 (req.user.directories.worlds/characters 없음).'
-                });
-            }
-
-            // 1. 입력 JSON에서 entries 추출 — datacat 'ST' 다운로드는 보통
-            //    이미 { entries: { "0": {...}, "1": {...} } } 형태(ST World Info 원본 포맷)이거나
-            //    { entries: [...] } 배열 형태일 수 있어 둘 다 처리한다.
-            let worldName = null;
-            let entriesObj = null;
-
-            if (lorebookJson.entries && !Array.isArray(lorebookJson.entries) && typeof lorebookJson.entries === 'object') {
-                // 이미 ST 표준 포맷 그대로
-                entriesObj = lorebookJson.entries;
-                worldName  = lorebookJson.name || lorebookJson.worldName || null;
-            } else {
-                // 배열 형태 → ST 포맷(0,1,2... 인덱스 키)으로 변환
-                const rawEntries = Array.isArray(lorebookJson.entries) ? lorebookJson.entries
-                                 : Array.isArray(lorebookJson)         ? lorebookJson
-                                 : [];
-                entriesObj = {};
-                rawEntries.forEach((e, i) => {
-                    entriesObj[String(i)] = {
-                        uid: i,
-                        key:            e.keys || e.key || e.keywords || [],
-                        keysecondary:   e.secondary_keys || e.keysecondary || [],
-                        comment:        e.comment || e.name || e.title || '',
-                        content:        e.content || e.value || e.text || '',
-                        constant:       Boolean(e.constant),
-                        selective:      e.selective !== false,
-                        order:          typeof e.insertion_order === 'number' ? e.insertion_order : i,
-                        position:       typeof e.position === 'number' ? e.position : 0,
-                        disable:        e.enabled === false || Boolean(e.disable),
-                        addMemo:        true,
-                        excludeRecursion: false,
-                        probability:    100,
-                        useProbability: true,
-                    };
-                });
-                worldName = lorebookJson.name || lorebookJson.title || null;
-            }
-
-            if (!entriesObj || Object.keys(entriesObj).length === 0) {
-                return res.status(400).json({ success: false, error: '로어북 JSON에서 entries를 찾을 수 없습니다.' });
-            }
-
-            // 2. World Info 파일명 결정 (캐릭터 이름 기반, 충돌 방지)
-            const baseWorldName = sanitizeFileName(worldName || `${charName} 로어북`);
-            if (!fs.existsSync(worldsDir)) fs.mkdirSync(worldsDir, { recursive: true });
-
-            let finalWorldName = baseWorldName;
-            let worldPath = path.join(worldsDir, `${finalWorldName}.json`);
-            let n = 1;
-            while (fs.existsSync(worldPath)) {
-                finalWorldName = `${baseWorldName}_${n}`;
-                worldPath = path.join(worldsDir, `${finalWorldName}.json`);
-                n++;
-            }
-
-            fs.writeFileSync(worldPath, JSON.stringify({ entries: entriesObj }, null, 2), 'utf8');
-            console.log(`[Janitor] ✅ World Info 저장 완료: ${worldPath}`);
-
-            // 3. 캐릭터 PNG 찾아서 extensions.world 필드 갱신
-            const files = fs.readdirSync(charactersDir).filter(f => f.toLowerCase().endsWith('.png'));
-            const targetFile = files.find(f => path.basename(f, '.png') === charName)
-                              || files.find(f => path.basename(f, '.png').toLowerCase() === charName.toLowerCase());
-
-            if (!targetFile) {
-                return res.json({
-                    success: true,
-                    worldName: finalWorldName,
-                    entryCount: Object.keys(entriesObj).length,
-                    warning: `World Info는 저장했지만 "${charName}" 캐릭터 파일을 찾지 못해 자동 연결은 못 했습니다. ST의 캐릭터 World Info 설정에서 직접 "${finalWorldName}"을 선택해 주세요.`
-                });
-            }
-
-            const charPngPath = path.join(charactersDir, targetFile);
-            const charPngBuf  = fs.readFileSync(charPngPath);
-            let card = readCharaCard(charPngBuf);
-            card = toV2Card(card);
-            if (card) {
-                card.data.extensions = card.data.extensions || {};
-                card.data.extensions.world = finalWorldName;
-                const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
-                const updatedPng = rebuildPng(charPngBuf, { chara: newB64, ccv3: newB64 });
-                fs.writeFileSync(charPngPath, updatedPng);
-                console.log(`[Janitor] ✅ 캐릭터 "${charName}" 에 World Info "${finalWorldName}" 연결 완료`);
-            }
-
-            res.json({
-                success:    true,
-                worldName:  finalWorldName,
-                entryCount: Object.keys(entriesObj).length
+                fileName: path.basename(finalPath)
             });
 
         } catch (err) {
