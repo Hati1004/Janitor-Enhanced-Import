@@ -72,18 +72,40 @@ function rebuildPng(pngBuf, textChunks) {
 }
 
 // ── PNG에서 chara 카드 JSON 읽기 ─────────────────────────────────
+// ccv3와 chara 둘 다 읽어서, alternate_greetings가 더 많이 들어있는
+// (=더 완전한) 쪽을 우선 사용한다. v3 스펙은 chara에 V2 호환용 축약본을
+// 넣고 ccv3에 멀티그리팅 등 전체 데이터를 넣는 경우가 흔하다.
 function readCharaCard(pngBuf) {
     const chunks = readAllChunks(pngBuf);
+    let charaCard = null;
+    let ccv3Card  = null;
+
     for (const chunk of chunks) {
         if (chunk.type !== 'tEXt') continue;
         const nullIdx = chunk.data.indexOf(0x00);
         if (nullIdx === -1) continue;
         const kw = chunk.data.slice(0, nullIdx).toString('latin1');
-        if (kw !== 'chara') continue;
+        if (kw !== 'chara' && kw !== 'ccv3') continue;
         try {
             const val = chunk.data.slice(nullIdx + 1).toString('latin1');
-            return JSON.parse(Buffer.from(val, 'base64').toString('utf8'));
-        } catch(e) { return null; }
+            const parsed = JSON.parse(Buffer.from(val, 'base64').toString('utf8'));
+            if (kw === 'chara') charaCard = parsed;
+            else ccv3Card = parsed;
+        } catch(e) { /* 해당 청크 건너뜀 */ }
+    }
+
+    const agCount = (c) => {
+        const ag = c?.data?.alternate_greetings || c?.alternate_greetings || [];
+        return Array.isArray(ag) ? ag.length : 0;
+    };
+
+    if (ccv3Card && agCount(ccv3Card) >= agCount(charaCard)) {
+        console.log(`[Janitor][DEBUG] ccv3 청크 사용 (alternate_greetings ${agCount(ccv3Card)}개, chara청크는 ${agCount(charaCard)}개)`);
+        return ccv3Card;
+    }
+    if (charaCard) {
+        console.log(`[Janitor][DEBUG] chara 청크 사용 (alternate_greetings ${agCount(charaCard)}개)`);
+        return charaCard;
     }
     return null;
 }
@@ -178,17 +200,6 @@ const BROWSER_HEADERS = {
     'Sec-Fetch-Site':     'same-site',
 };
 
-// ── 쿠키 문자열 정규화 ───────────────────────────────────────────
-// 사용자가 "name=value; name2=value2" 형식이 아니라 값만 붙여넣은 경우를
-// 대비해, '=' 가 없으면 sb-auth-auth-token.0 으로 감싸서 최소한 동작은 시도한다.
-function normalizeCookieString(raw) {
-    if (!raw) return '';
-    const trimmed = raw.trim();
-    if (!trimmed) return '';
-    if (trimmed.includes('=')) return trimmed;
-    return `sb-auth-auth-token.0=${trimmed}`;
-}
-
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
@@ -235,20 +246,16 @@ function init(router) {
 
     // C. 로어북 스크립트 조회
     // 실측 확인된 경로: https://janitorai.com/hampter/script/<scriptUuid>  (단수 'script', 'scripts' 아님)
-    // janitorCookie가 주어지면 Cookie 헤더로 같이 보내 로그인 세션이 필요한 경우를 시도한다.
-    async function fetchScriptLorebook(scriptUuid, janitorCookie) {
+    async function fetchScriptLorebook(scriptUuid) {
         const endpoints = [
             `https://janitorai.com/hampter/script/${scriptUuid}`,   // 실제 확인된 경로
             `https://janitorai.com/hampter/scripts/${scriptUuid}`,  // 구버전 추정 경로(폴백)
             `https://janitorai.com/api/v1/scripts/${scriptUuid}`,
             `https://janitorai.com/api/scripts/${scriptUuid}`,
         ];
-        const headers = { ...BROWSER_HEADERS };
-        if (janitorCookie) headers['Cookie'] = janitorCookie;
-
         for (const url of endpoints) {
             try {
-                const res = await fetch(url, { headers });
+                const res = await fetch(url, { headers: BROWSER_HEADERS });
                 if (!res.ok) { console.log(`[Janitor] 스크립트 조회 실패 ${url} → HTTP ${res.status}`); continue; }
                 const json = await res.json();
                 console.log(`[Janitor] ✅ 스크립트 응답 획득 (${url}), 키:`, Object.keys(json).join(', '));
@@ -297,12 +304,9 @@ function init(router) {
     }
 
     // E. 캐릭터 페이지 HTML 파싱 (보조 수단 — Next.js CSR 구조에서는 빈 결과가 흔함)
-    //    janitorCookie가 있으면 로그인 상태로 요청 — JanitorAI는 비로그인시
-    //    캐릭터 콘텐츠 자체를 내려주지 않는 것으로 확인됨(성인인증 게이트).
-    async function scrapeScriptUuids(characterPageUrl, janitorCookie) {
+    async function scrapeScriptUuids(characterPageUrl) {
         try {
             const headers = { ...BROWSER_HEADERS, 'Accept': 'text/html' };
-            if (janitorCookie) headers['Cookie'] = janitorCookie;
             const res = await fetch(characterPageUrl, { headers });
             if (!res.ok) { console.log(`[Janitor] 캐릭터 페이지 조회 실패 HTTP ${res.status}`); return []; }
             const html = await res.text();
@@ -327,8 +331,7 @@ function init(router) {
     }
 
     // E. 메인: PNG + 로어북 조합
-    async function buildFinalPng(uuid, characterPageUrl, janitorCookieRaw) {
-        const janitorCookie = normalizeCookieString(janitorCookieRaw);
+    async function buildFinalPng(uuid, characterPageUrl) {
         let card = null;
         let rawMeta = null;
         let avatarPngBuf = null;
@@ -411,7 +414,7 @@ function init(router) {
         if (card?.data) {
             for (const u of findScriptUuidsInObject(card.data)) scriptUuidSet.add(u);
         }
-        for (const u of await scrapeScriptUuids(characterPageUrl, janitorCookie)) scriptUuidSet.add(u);
+        for (const u of await scrapeScriptUuids(characterPageUrl)) scriptUuidSet.add(u);
 
         console.log(`[Janitor] 수집된 스크립트 UUID 후보 (${scriptUuidSet.size}개):`, [...scriptUuidSet]);
 
@@ -419,7 +422,7 @@ function init(router) {
         if (scriptUuidSet.size > 0) {
             const allEntries = [];
             for (const sid of scriptUuidSet) {
-                const scriptData = await fetchScriptLorebook(sid, janitorCookie);
+                const scriptData = await fetchScriptLorebook(sid);
                 if (!scriptData) continue;
                 // 다양한 응답 구조 처리
                 const entries = scriptData.entries    || scriptData.items      ||
@@ -481,14 +484,14 @@ function init(router) {
     // ── 메인 라우트: 추출만 (다운로드 모드에서 사용) ───────────────
     router.post('/fetch', async (req, res) => {
         try {
-            const { url, janitorCookie } = req.body;
+            const { url } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url, janitorCookie);
+            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url);
 
             res.json({
                 success:   true,
@@ -508,14 +511,14 @@ function init(router) {
     // "Unsupported format: undefined" 문제를 원천적으로 회피한다.
     router.post('/fetch-and-save', async (req, res) => {
         try {
-            const { url, janitorCookie } = req.body;
+            const { url } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url, janitorCookie);
+            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
@@ -544,6 +547,121 @@ function init(router) {
                 charName: charName,
                 fileName: path.basename(finalPath),
                 lorebookEntryCount
+            });
+
+        } catch (err) {
+            console.error('[Janitor 플러그인 에러]', err.message);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+
+    // ── 로어북 연동 라우트 ──────────────────────────────────────────
+    // datacat에서 받은 로어북 JSON(이미 ST World Info 포맷이거나 비슷한 구조)을
+    // 1) ST worlds 폴더에 World Info 파일로 저장
+    // 2) 해당 캐릭터 PNG의 data.extensions.world 필드를 갱신해 자동 연결
+    router.post('/attach-lorebook', async (req, res) => {
+        try {
+            const { charName, lorebookJson } = req.body;
+            if (!charName)     return res.status(400).json({ success: false, error: '캐릭터 이름이 필요합니다.' });
+            if (!lorebookJson) return res.status(400).json({ success: false, error: '로어북 JSON이 필요합니다.' });
+
+            const worldsDir     = req.user?.directories?.worlds;
+            const charactersDir = req.user?.directories?.characters;
+            if (!worldsDir || !charactersDir) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'ST 폴더 경로를 찾을 수 없습니다 (req.user.directories.worlds/characters 없음).'
+                });
+            }
+
+            // 1. 입력 JSON에서 entries 추출 — datacat 'ST' 다운로드는 보통
+            //    이미 { entries: { "0": {...}, "1": {...} } } 형태(ST World Info 원본 포맷)이거나
+            //    { entries: [...] } 배열 형태일 수 있어 둘 다 처리한다.
+            let worldName = null;
+            let entriesObj = null;
+
+            if (lorebookJson.entries && !Array.isArray(lorebookJson.entries) && typeof lorebookJson.entries === 'object') {
+                // 이미 ST 표준 포맷 그대로
+                entriesObj = lorebookJson.entries;
+                worldName  = lorebookJson.name || lorebookJson.worldName || null;
+            } else {
+                // 배열 형태 → ST 포맷(0,1,2... 인덱스 키)으로 변환
+                const rawEntries = Array.isArray(lorebookJson.entries) ? lorebookJson.entries
+                                 : Array.isArray(lorebookJson)         ? lorebookJson
+                                 : [];
+                entriesObj = {};
+                rawEntries.forEach((e, i) => {
+                    entriesObj[String(i)] = {
+                        uid: i,
+                        key:            e.keys || e.key || e.keywords || [],
+                        keysecondary:   e.secondary_keys || e.keysecondary || [],
+                        comment:        e.comment || e.name || e.title || '',
+                        content:        e.content || e.value || e.text || '',
+                        constant:       Boolean(e.constant),
+                        selective:      e.selective !== false,
+                        order:          typeof e.insertion_order === 'number' ? e.insertion_order : i,
+                        position:       typeof e.position === 'number' ? e.position : 0,
+                        disable:        e.enabled === false || Boolean(e.disable),
+                        addMemo:        true,
+                        excludeRecursion: false,
+                        probability:    100,
+                        useProbability: true,
+                    };
+                });
+                worldName = lorebookJson.name || lorebookJson.title || null;
+            }
+
+            if (!entriesObj || Object.keys(entriesObj).length === 0) {
+                return res.status(400).json({ success: false, error: '로어북 JSON에서 entries를 찾을 수 없습니다.' });
+            }
+
+            // 2. World Info 파일명 결정 (캐릭터 이름 기반, 충돌 방지)
+            const baseWorldName = sanitizeFileName(worldName || `${charName} 로어북`);
+            if (!fs.existsSync(worldsDir)) fs.mkdirSync(worldsDir, { recursive: true });
+
+            let finalWorldName = baseWorldName;
+            let worldPath = path.join(worldsDir, `${finalWorldName}.json`);
+            let n = 1;
+            while (fs.existsSync(worldPath)) {
+                finalWorldName = `${baseWorldName}_${n}`;
+                worldPath = path.join(worldsDir, `${finalWorldName}.json`);
+                n++;
+            }
+
+            fs.writeFileSync(worldPath, JSON.stringify({ entries: entriesObj }, null, 2), 'utf8');
+            console.log(`[Janitor] ✅ World Info 저장 완료: ${worldPath}`);
+
+            // 3. 캐릭터 PNG 찾아서 extensions.world 필드 갱신
+            const files = fs.readdirSync(charactersDir).filter(f => f.toLowerCase().endsWith('.png'));
+            const targetFile = files.find(f => path.basename(f, '.png') === charName)
+                              || files.find(f => path.basename(f, '.png').toLowerCase() === charName.toLowerCase());
+
+            if (!targetFile) {
+                return res.json({
+                    success: true,
+                    worldName: finalWorldName,
+                    entryCount: Object.keys(entriesObj).length,
+                    warning: `World Info는 저장했지만 "${charName}" 캐릭터 파일을 찾지 못해 자동 연결은 못 했습니다. ST의 캐릭터 World Info 설정에서 직접 "${finalWorldName}"을 선택해 주세요.`
+                });
+            }
+
+            const charPngPath = path.join(charactersDir, targetFile);
+            const charPngBuf  = fs.readFileSync(charPngPath);
+            let card = readCharaCard(charPngBuf);
+            card = toV2Card(card);
+            if (card) {
+                card.data.extensions = card.data.extensions || {};
+                card.data.extensions.world = finalWorldName;
+                const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
+                const updatedPng = rebuildPng(charPngBuf, { chara: newB64, ccv3: newB64 });
+                fs.writeFileSync(charPngPath, updatedPng);
+                console.log(`[Janitor] ✅ 캐릭터 "${charName}" 에 World Info "${finalWorldName}" 연결 완료`);
+            }
+
+            res.json({
+                success:    true,
+                worldName:  finalWorldName,
+                entryCount: Object.keys(entriesObj).length
             });
 
         } catch (err) {
