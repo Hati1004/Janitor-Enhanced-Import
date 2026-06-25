@@ -178,6 +178,17 @@ const BROWSER_HEADERS = {
     'Sec-Fetch-Site':     'same-site',
 };
 
+// ── 쿠키 문자열 정규화 ───────────────────────────────────────────
+// 사용자가 "name=value; name2=value2" 형식이 아니라 값만 붙여넣은 경우를
+// 대비해, '=' 가 없으면 sb-auth-auth-token.0 으로 감싸서 최소한 동작은 시도한다.
+function normalizeCookieString(raw) {
+    if (!raw) return '';
+    const trimmed = raw.trim();
+    if (!trimmed) return '';
+    if (trimmed.includes('=')) return trimmed;
+    return `sb-auth-auth-token.0=${trimmed}`;
+}
+
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
@@ -316,7 +327,8 @@ function init(router) {
     }
 
     // E. 메인: PNG + 로어북 조합
-    async function buildFinalPng(uuid, characterPageUrl, janitorCookie) {
+    async function buildFinalPng(uuid, characterPageUrl, janitorCookieRaw) {
+        const janitorCookie = normalizeCookieString(janitorCookieRaw);
         let card = null;
         let rawMeta = null;
         let avatarPngBuf = null;
@@ -439,7 +451,11 @@ function init(router) {
         // ccv3 청크도 같은 내용으로 덮어써서 ST가 혼동하지 않게 함
         pngBuf = rebuildPng(pngBuf, { chara: newB64, ccv3: newB64 });
 
-        return { pngBuf, charName: card.data.name || uuid };
+        return {
+            pngBuf,
+            charName: card.data.name || uuid,
+            lorebookEntryCount: lorebook ? lorebook.entries.length : 0
+        };
     }
 
     // ── F. 안전한 파일명 생성 ────────────────────────────────────
@@ -465,19 +481,20 @@ function init(router) {
     // ── 메인 라우트: 추출만 (다운로드 모드에서 사용) ───────────────
     router.post('/fetch', async (req, res) => {
         try {
-            const { url } = req.body;
+            const { url, janitorCookie } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url, janitorCookie);
 
             res.json({
                 success:   true,
                 pngBase64: pngBuf.toString('base64'),
-                charName:  charName
+                charName:  charName,
+                lorebookEntryCount
             });
 
         } catch (err) {
@@ -491,14 +508,14 @@ function init(router) {
     // "Unsupported format: undefined" 문제를 원천적으로 회피한다.
     router.post('/fetch-and-save', async (req, res) => {
         try {
-            const { url } = req.body;
+            const { url, janitorCookie } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName, lorebookEntryCount } = await buildFinalPng(uuid, url, janitorCookie);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
@@ -525,7 +542,8 @@ function init(router) {
             res.json({
                 success:  true,
                 charName: charName,
-                fileName: path.basename(finalPath)
+                fileName: path.basename(finalPath),
+                lorebookEntryCount
             });
 
         } catch (err) {
