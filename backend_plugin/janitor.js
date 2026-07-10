@@ -192,7 +192,15 @@ function init(router) {
             headers: { ...BROWSER_HEADERS, 'Accept': 'application/json' }
         });
         if (!res.ok) throw new Error(`datacat HTTP ${res.status}`);
-        const data = await res.json();
+        // 진단용: JSON 파싱 전에 원본 텍스트를 먼저 확보해서 실패 시 그대로 로그로 남긴다.
+        const rawText = await res.text();
+        let data;
+        try {
+            data = JSON.parse(rawText);
+        } catch (parseErr) {
+            console.log(`[Janitor][DEBUG] datacat 응답이 JSON이 아님. 앞부분 300자: ${rawText.slice(0, 300)}`);
+            throw parseErr;
+        }
         console.log('[Janitor][DEBUG] datacat 원본 응답 전체:', JSON.stringify(data));
         const dlUrl = data.downloadUrl || data.url || data.download_url;
         if (!dlUrl) throw new Error('datacat URL 없음');
