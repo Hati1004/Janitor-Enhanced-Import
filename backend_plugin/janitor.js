@@ -188,8 +188,11 @@ function init(router) {
             spec_version: '2.0',
             data: {
                 name:                       apiData.name || apiData.chat_name || '',
-                description:                stripHtml(apiData.description),
-                personality:                stripHtml(apiData.personality),
+                // 주의: JanitorAI 네이티브 API는 description/personality 필드의 내용물이
+                // ST가 기대하는 것과 반대로 들어있다(description에 실제 성격/서사가,
+                // personality에 세팅 문구가 들어있는 경우가 확인됨). 그래서 여기서 교차 매핑한다.
+                description:                stripHtml(apiData.personality),
+                personality:                stripHtml(apiData.description),
                 scenario:                   stripHtml(apiData.scenario),
                 first_mes:                  stripHtml(apiData.first_message),
                 mes_example:                stripHtml(apiData.example_dialogs),
