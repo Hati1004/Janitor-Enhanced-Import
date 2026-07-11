@@ -418,30 +418,6 @@ function init(router) {
         return candidate;
     }
 
-    // ── 메인 라우트: 추출만 (다운로드 모드에서 사용) ───────────────
-    router.post('/fetch', async (req, res) => {
-        try {
-            const { url, nativeApiData } = req.body;
-            if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
-
-            const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-            if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
-            const uuid = m[0];
-
-            const { pngBuf, charName } = await buildFinalPng(uuid, url, nativeApiData);
-
-            res.json({
-                success:   true,
-                pngBase64: pngBuf.toString('base64'),
-                charName:  charName
-            });
-
-        } catch (err) {
-            console.error('[Janitor 플러그인 에러]', err.message);
-            res.status(500).json({ success: false, error: err.message });
-        }
-    });
-
     // ── 메인 라우트: 추출 + ST characters 폴더에 직접 저장 ─────────
     // ST의 /api/characters/import 를 거치지 않고 파일을 직접 써서
     // "Unsupported format: undefined" 문제를 원천적으로 회피한다.
