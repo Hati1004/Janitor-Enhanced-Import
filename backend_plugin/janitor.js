@@ -167,10 +167,71 @@ const BROWSER_HEADERS = {
     'Sec-Fetch-Site':     'same-site',
 };
 
+// ── HTML 태그 제거 (description/personality 등에 <p> 등이 섞여 옴) ──
+function stripHtml(s) {
+    return String(s || '').replace(/<[^>]*>/g, '').trim();
+}
+
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
     console.log("================================================");
+
+    // 0-A. 네이티브 JanitorAI API (본인 계정 Bearer 토큰 필요)
+    // datacat/JannyAI 같은 제3자 미러를 거치지 않고 janitorai.com 자체 API를 호출한다.
+    async function tryJanitorNative(uuid, token) {
+        const res = await fetch(`https://janitorai.com/hampter/characters/${uuid}`, {
+            headers: { ...BROWSER_HEADERS, 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error(`네이티브 API HTTP ${res.status}`);
+        const apiData = await res.json();
+        if (!apiData?.id) throw new Error('네이티브 API 응답에 캐릭터 데이터가 없습니다.');
+        console.log('[Janitor][DEBUG] 네이티브 API 필드:', Object.keys(apiData).join(', '));
+        return apiData;
+    }
+
+    // 네이티브 API 응답 → V2 카드. scenario/tags/example_dialogs는
+    // 대부분의 제작자가 비워두므로 기본값(빈 문자열/배열)만 채운다.
+    function nativeToV2Card(apiData) {
+        return {
+            spec: 'chara_card_v2',
+            spec_version: '2.0',
+            data: {
+                name:                       apiData.name || apiData.chat_name || '',
+                description:                stripHtml(apiData.description),
+                personality:                stripHtml(apiData.personality),
+                scenario:                   stripHtml(apiData.scenario),
+                first_mes:                  stripHtml(apiData.first_message),
+                mes_example:                stripHtml(apiData.example_dialogs),
+                creator_notes:              apiData.creator_name ? `JanitorAI 원작자: ${apiData.creator_name}` : '',
+                system_prompt:              '',
+                post_history_instructions:  '',
+                tags:                       apiData.custom_tags || apiData.tags || [],
+                creator:                    apiData.creator_name || '',
+                character_version:          '',
+                alternate_greetings:        [],
+                character_book:             null,
+                extensions:                 {},
+            }
+        };
+    }
+
+    // 아바타(webp) → PNG 변환. sharp가 없으면 명확한 설치 안내와 함께 실패시킨다.
+    async function fetchAvatarAsPng(avatarFileName) {
+        if (!avatarFileName) throw new Error('네이티브 API 응답에 avatar 파일명이 없습니다.');
+        const avatarUrl = `https://ella.janitorai.com/bot-avatars/${avatarFileName}?width=1200`;
+        const res = await fetch(avatarUrl, { headers: BROWSER_HEADERS });
+        if (!res.ok) throw new Error(`아바타 다운로드 실패 HTTP ${res.status}`);
+        const inputBuf = Buffer.from(await res.arrayBuffer());
+
+        let sharp;
+        try {
+            sharp = require('sharp');
+        } catch (e) {
+            throw new Error('sharp 모듈이 설치되어 있지 않습니다. 플러그인 폴더(backend_plugin)에서 "npm install sharp" 실행 후 ST를 재시작하세요.');
+        }
+        return await sharp(inputBuf).png().toBuffer();
+    }
 
     // A. JannyAI API → PNG downloadUrl
     async function tryJannyApi(uuid) {
@@ -211,14 +272,29 @@ function init(router) {
     // 참고: JanitorAI의 로어북(Scripts)과 datacat의 'core' 추출 경로는 모두
     // 로그인 세션(Cloudflare 포함) 인증이 필요해 서버 단독으로는 접근할 수 없는 것이
     // 실측으로 확인되어, 이 기능은 PNG(대체 인사말 포함) 추출에 집중한다.
-    async function buildFinalPng(uuid, characterPageUrl) {
+    async function buildFinalPng(uuid, characterPageUrl, janitorToken) {
         let avatarPngBuf = null;
         let source = 'unknown';
+        let nativeCard = null;
 
-        // PNG 베이스 이미지 확보: datacat(익명) → JannyAI 순으로 시도.
+        // 0. 네이티브 API 우선 시도 (토큰이 설정되어 있을 때만).
+        // 성공하면 datacat/JannyAI는 아예 건드리지 않는다 — 본인 세션 기반이라 더 안정적.
+        if (janitorToken) {
+            try {
+                const apiData = await tryJanitorNative(uuid, janitorToken);
+                nativeCard = nativeToV2Card(apiData);
+                avatarPngBuf = await fetchAvatarAsPng(apiData.avatar);
+                source = 'native';
+                console.log('[Janitor] ✅ 네이티브 API로 카드+아바타 확보 완료');
+            } catch (e0) {
+                console.log(`[Janitor] 네이티브 API 실패(${e0.message}), datacat/JannyAI로 폴백...`);
+            }
+        }
+
+        // PNG 베이스 이미지 확보(네이티브가 실패했을 때만): datacat(익명) → JannyAI 순으로 시도.
         // 둘 다 캐시 데이터의 완전성이 캐릭터마다 달라, 실패한 쪽으로 자동 폴백한다.
         let downloadUrl = null;
-        try {
+        if (!avatarPngBuf) try {
             const r = await tryDatacat(uuid);
             downloadUrl = r.downloadUrl;
             source = 'datacat';
@@ -249,17 +325,24 @@ function init(router) {
             throw new Error('PNG 베이스 이미지를 어떤 소스에서도 가져오지 못했습니다.');
         }
 
-        // PNG에 임베드된 카드 읽기 (chara/ccv3 중 더 완전한 쪽 자동 선택)
-        let card = readCharaCard(avatarPngBuf);
-        if (card) {
-            const rawAg = card.data?.alternate_greetings || card.alternate_greetings || [];
-            console.log(`[Janitor][DEBUG] PNG 임베드 카드의 alternate_greetings 개수: ${rawAg.length}`);
+        // 네이티브 API로 이미 카드를 만들었으면 그걸 그대로 쓴다.
+        // (변환된 아바타 PNG엔 원래 chara/ccv3 청크가 없으므로 다시 읽을 필요가 없음)
+        let card;
+        if (nativeCard) {
+            card = nativeCard;
         } else {
-            console.log('[Janitor][DEBUG] PNG에 chara/ccv3 텍스트 청크 자체가 없음');
-        }
-        card = toV2Card(card);
-        if (!card) {
-            card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: uuid } };
+            // PNG에 임베드된 카드 읽기 (chara/ccv3 중 더 완전한 쪽 자동 선택)
+            card = readCharaCard(avatarPngBuf);
+            if (card) {
+                const rawAg = card.data?.alternate_greetings || card.alternate_greetings || [];
+                console.log(`[Janitor][DEBUG] PNG 임베드 카드의 alternate_greetings 개수: ${rawAg.length}`);
+            } else {
+                console.log('[Janitor][DEBUG] PNG에 chara/ccv3 텍스트 청크 자체가 없음');
+            }
+            card = toV2Card(card);
+            if (!card) {
+                card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: uuid } };
+            }
         }
         console.log(`[Janitor] 카드 변환: spec=${card.spec} v=${card.spec_version} (소스: ${source})`);
 
@@ -296,14 +379,14 @@ function init(router) {
     // ── 메인 라우트: 추출만 (다운로드 모드에서 사용) ───────────────
     router.post('/fetch', async (req, res) => {
         try {
-            const { url } = req.body;
+            const { url, janitorToken } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url, janitorToken);
 
             res.json({
                 success:   true,
@@ -322,14 +405,14 @@ function init(router) {
     // "Unsupported format: undefined" 문제를 원천적으로 회피한다.
     router.post('/fetch-and-save', async (req, res) => {
         try {
-            const { url } = req.body;
+            const { url, janitorToken } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url, janitorToken);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
