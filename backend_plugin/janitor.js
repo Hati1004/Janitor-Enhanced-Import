@@ -177,20 +177,10 @@ function init(router) {
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
     console.log("================================================");
 
-    // 0-A. 네이티브 JanitorAI API (본인 계정 Bearer 토큰 필요)
-    // datacat/JannyAI 같은 제3자 미러를 거치지 않고 janitorai.com 자체 API를 호출한다.
-    async function tryJanitorNative(uuid, token) {
-        const res = await fetch(`https://janitorai.com/hampter/characters/${uuid}`, {
-            headers: { ...BROWSER_HEADERS, 'Authorization': `Bearer ${token}` }
-        });
-        if (!res.ok) throw new Error(`네이티브 API HTTP ${res.status}`);
-        const apiData = await res.json();
-        if (!apiData?.id) throw new Error('네이티브 API 응답에 캐릭터 데이터가 없습니다.');
-        console.log('[Janitor][DEBUG] 네이티브 API 필드:', Object.keys(apiData).join(', '));
-        return apiData;
-    }
-
-    // 네이티브 API 응답 → V2 카드. scenario/tags/example_dialogs는
+    // 0-A. 네이티브 JanitorAI 캐릭터 데이터 → V2 카드 변환
+    // 주의: 이 API(hampter/characters/{uuid})는 Cloudflare 봇 감지가 걸려 있어
+    // 서버(Node fetch)에서 직접 호출하면 토큰이 맞아도 403이 뜬다. 그래서 이 데이터는
+    // 프론트엔드(index.js, 실제 브라우저)에서 이미 fetch해온 것을 그대로 받아 변환만 한다.
     // 대부분의 제작자가 비워두므로 기본값(빈 문자열/배열)만 채운다.
     function nativeToV2Card(apiData) {
         return {
@@ -272,22 +262,22 @@ function init(router) {
     // 참고: JanitorAI의 로어북(Scripts)과 datacat의 'core' 추출 경로는 모두
     // 로그인 세션(Cloudflare 포함) 인증이 필요해 서버 단독으로는 접근할 수 없는 것이
     // 실측으로 확인되어, 이 기능은 PNG(대체 인사말 포함) 추출에 집중한다.
-    async function buildFinalPng(uuid, characterPageUrl, janitorToken) {
+    async function buildFinalPng(uuid, characterPageUrl, nativeApiData) {
         let avatarPngBuf = null;
         let source = 'unknown';
         let nativeCard = null;
 
-        // 0. 네이티브 API 우선 시도 (토큰이 설정되어 있을 때만).
-        // 성공하면 datacat/JannyAI는 아예 건드리지 않는다 — 본인 세션 기반이라 더 안정적.
-        if (janitorToken) {
+        // 0. 프론트엔드가 이미 브라우저에서 fetch해온 네이티브 캐릭터 데이터가 있으면 그걸 사용.
+        // (서버에서 직접 호출하면 Cloudflare 봇 감지에 막히므로, 반드시 브라우저 쪽에서 받아와야 함)
+        if (nativeApiData) {
             try {
-                const apiData = await tryJanitorNative(uuid, janitorToken);
-                nativeCard = nativeToV2Card(apiData);
-                avatarPngBuf = await fetchAvatarAsPng(apiData.avatar);
+                if (!nativeApiData.id) throw new Error('전달받은 데이터에 캐릭터 id가 없습니다.');
+                nativeCard = nativeToV2Card(nativeApiData);
+                avatarPngBuf = await fetchAvatarAsPng(nativeApiData.avatar);
                 source = 'native';
-                console.log('[Janitor] ✅ 네이티브 API로 카드+아바타 확보 완료');
+                console.log('[Janitor] ✅ 네이티브(브라우저 fetch) 데이터로 카드+아바타 확보 완료');
             } catch (e0) {
-                console.log(`[Janitor] 네이티브 API 실패(${e0.message}), datacat/JannyAI로 폴백...`);
+                console.log(`[Janitor] 네이티브 데이터 처리 실패(${e0.message}), datacat/JannyAI로 폴백...`);
             }
         }
 
@@ -379,14 +369,14 @@ function init(router) {
     // ── 메인 라우트: 추출만 (다운로드 모드에서 사용) ───────────────
     router.post('/fetch', async (req, res) => {
         try {
-            const { url, janitorToken } = req.body;
+            const { url, nativeApiData } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url, janitorToken);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url, nativeApiData);
 
             res.json({
                 success:   true,
@@ -405,14 +395,14 @@ function init(router) {
     // "Unsupported format: undefined" 문제를 원천적으로 회피한다.
     router.post('/fetch-and-save', async (req, res) => {
         try {
-            const { url, janitorToken } = req.body;
+            const { url, nativeApiData } = req.body;
             if (!url) return res.status(400).json({ success: false, error: 'URL이 필요합니다.' });
 
             const m = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url, janitorToken);
+            const { pngBuf, charName } = await buildFinalPng(uuid, url, nativeApiData);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
