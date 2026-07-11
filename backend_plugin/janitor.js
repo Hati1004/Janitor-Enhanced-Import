@@ -349,6 +349,55 @@ function init(router) {
         };
     }
 
+    // ── H. JanitorAI 로어북 엔트리 → ST World Info 변환 ────────────
+    // JanitorAI Scripts의 정확한 필드명이 문서화돼 있지 않아, 여러 후보
+    // 필드명을 순서대로 확인하는 방어적 매핑을 사용한다.
+    function janitorEntriesToWorldInfo(entries) {
+        const wiEntries = {};
+        entries.forEach((e, idx) => {
+            const rawKeys = e.keys ?? e.key ?? e.keywords ?? e.triggers ?? e.trigger_words ?? e.primary_keys ?? [];
+            const key = Array.isArray(rawKeys)
+                ? rawKeys
+                : String(rawKeys || '').split(',').map(s => s.trim()).filter(Boolean);
+
+            wiEntries[String(idx)] = {
+                uid: idx,
+                key,
+                keysecondary: [],
+                comment: e.comment || e.name || e.entry_name || '',
+                content: stripHtml(e.content || ''),
+                constant: !!e.constant,
+                selective: true,
+                selectiveLogic: 0,
+                addMemo: true,
+                order: 100,
+                position: 0,
+                disable: e.enabled === false || e.disabled === true,
+                excludeRecursion: false,
+                preventRecursion: false,
+                delayUntilRecursion: false,
+                probability: 100,
+                useProbability: true,
+                depth: typeof e.depth === 'number' ? e.depth : 4,
+                group: e.category || '',
+                groupOverride: false,
+                groupWeight: typeof e.groupWeight === 'number' ? e.groupWeight : 100,
+                scanDepth: null,
+                caseSensitive: typeof e.case_sensitive === 'boolean' ? e.case_sensitive : null,
+                matchWholeWords: null,
+                useGroupScoring: null,
+                automationId: '',
+                role: null,
+                vectorized: false,
+                sticky: 0,
+                cooldown: 0,
+                delay: 0,
+                displayIndex: idx
+            };
+        });
+        return { entries: wiEntries };
+    }
+
     // ── F. 안전한 파일명 생성 ────────────────────────────────────
     function sanitizeFileName(name) {
         const cleaned = String(name || 'character')
@@ -433,6 +482,48 @@ function init(router) {
                 success:  true,
                 charName: charName,
                 fileName: path.basename(finalPath)
+            });
+
+        } catch (err) {
+            console.error('[Janitor 플러그인 에러]', err.message);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+    // ── 메인 라우트: 로어북(Scripts) 엔트리 → ST World Info로 저장 ──
+    router.post('/save-worldbook', async (req, res) => {
+        try {
+            const { bookName, entries } = req.body;
+            if (!Array.isArray(entries) || entries.length === 0) {
+                return res.status(400).json({ success: false, error: '엔트리 데이터가 없습니다.' });
+            }
+
+            // ST 1.12+ 멀티유저 구조: req.user.directories.worlds
+            const worldsDir = req.user?.directories?.worlds;
+            if (!worldsDir) {
+                console.error('[Janitor] req.user.directories.worlds 를 찾을 수 없음.');
+                return res.status(500).json({
+                    success: false,
+                    error: 'worlds 디렉토리를 찾을 수 없습니다 (req.user.directories.worlds 없음). ST 버전을 확인하세요.'
+                });
+            }
+            if (!fs.existsSync(worldsDir)) fs.mkdirSync(worldsDir, { recursive: true });
+
+            const safeName  = sanitizeFileName(bookName || 'JanitorLorebook');
+            let candidate   = path.join(worldsDir, `${safeName}.json`);
+            let n = 1;
+            while (fs.existsSync(candidate)) {
+                candidate = path.join(worldsDir, `${safeName}_${n}.json`);
+                n++;
+            }
+
+            const wiData = janitorEntriesToWorldInfo(entries);
+            fs.writeFileSync(candidate, JSON.stringify(wiData, null, 2));
+            console.log(`[Janitor] ✅ 로어북 저장 완료: ${candidate} (엔트리 ${entries.length}개)`);
+
+            res.json({
+                success:  true,
+                fileName: path.basename(candidate, '.json'),
+                count:    entries.length
             });
 
         } catch (err) {
