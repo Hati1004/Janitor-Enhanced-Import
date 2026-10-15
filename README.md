@@ -66,28 +66,6 @@ JanitorAI의 캐릭터 카드(PNG)와 로어북(Scripts)을 SillyTavern으로 �
 ### 로어북(Scripts) 가져오기
 - janitorai.com의 Scripts 편집 화면에서 Tampermonkey **"📤 ST로 보내기"** 버튼 클릭
 - 뜨는 창에서 저장할 로어북 이름을 확인하고 확인 누르면, SillyTavern의 World Info(로어북) 목록에 바로 추가됩니다.
-
----
-
-**업데이트할 때:**
-```bash
-cd ~/Janitor-Enhanced-Import-Termux && git reset --hard && git pull && bash install-termux.sh
-```
----
-
-## 삭제
-Termux에서 아래를 실행한 뒤 ST를 재시작하세요.
-```bash
-rm -f ~/SillyTavern/plugins/janitor.cjs
-rm -rf ~/SillyTavern/public/scripts/extensions/third-party/Janitor-Enhanced-Import
-cd ~ && rm -rf ~/Janitor-Enhanced-Import-Termux
-```
-
-- **유저스크립트:** Firefox → Tampermonkey 대시보드 → "Janitor Enhanced Import (Termux)" 삭제. 저장된 토큰과 ST 주소도 함께 지워집니다.
-- 설치 스크립트가 켠 `enableServerPlugins`는 다른 서버 플러그인이 쓸 수 있어 그대로 둡니다. 다른 플러그인을 쓰지 않는다면 아래로 끌 수 있습니다.
-  ```bash
-  sed -i 's/^enableServerPlugins:.*/enableServerPlugins: false/' ~/SillyTavern/config.yaml
-  ```
   
 ---
 
