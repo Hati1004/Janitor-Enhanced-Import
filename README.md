@@ -74,19 +74,17 @@ JanitorAI의 캐릭터 카드(PNG)와 로어북(Scripts)을 SillyTavern으로 �
 - **PC 올바른 위치**
 PC: `~public/scripts/extensions/third-party/Janitor-Enhanced-Import` 폴더 안에 `index.js`, `manifest.json`, `style.css`. 
 `~GitHub/SillyTavern/plugins` 폴더 안에 `janitor.js`
- 
+
+ ```
 Q. 404 Not Found 에러가 뜹니다.
   A. `janitor.js`가 `plugins` 폴더에 제대로 들어가지 않았거나, `config.yaml`에서 플러그인 설정이 켜지지 않은 것입니다. 서버 창을 껐다 켜보세요.
-  ```
 Q. 대체 인사말이 1개만 보입니다.
   A. 소스 캐시 자체에 데이터가 없는 경우입니다. 구름이랑 똑같은 원리
-```
 Q. ST 눌렀을때 임포트 실패 401 등
 - 토큰 값은 로그인 세션이라 보안 때문에 시간 지나면 계속 바뀝니다. 본인 새 로그인 토큰 다시 복붙 해서 쓰면 됩니다 (재니터 홈페이지 창에서 Tampermonkey 누른 후 JanitorAI 토큰 재설정 본인 키 입력).
-- ```
 Q. 로어북 엔트리를 못 찾음
 - 로어북 소스 네모 창 끝까지 보이는지 확인하세요.
-
+```
 ## 주의사항
 
 이 확장은 JanitorAI의 비공식 API/페이지 구조에 의존합니다. JanitorAI 쪽 구조가 바뀌면 일부 기능이 동작하지 않을 수 있습니다.
