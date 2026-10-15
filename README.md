@@ -71,8 +71,7 @@ JanitorAI의 캐릭터 카드(PNG)와 로어북(Scripts)을 SillyTavern으로 �
 
 ## 문제 해결
 
-PC
-올바른 위치들
+- PC 올바른 위치
 PC: `~public/scripts/extensions/third-party/Janitor-Enhanced-Import` 폴더 안에 `index.js`, `manifest.json`, `style.css`. 
 `~GitHub/SillyTavern/plugins` 폴더 안에 `janitor.js`
  
