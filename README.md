@@ -84,7 +84,6 @@ cd ~ && rm -rf ~/Janitor-Enhanced-Import-Termux
 ```
 
 - **유저스크립트:** Firefox → Tampermonkey 대시보드 → "Janitor Enhanced Import (Termux)" 삭제. 저장된 토큰과 ST 주소도 함께 지워집니다.
-- **가져온 캐릭터/로어북**은 ST 데이터에 그대로 남습니다. 필요 없으면 ST 화면에서 직접 삭제하세요.
 - 설치 스크립트가 켠 `enableServerPlugins`는 다른 서버 플러그인이 쓸 수 있어 그대로 둡니다. 다른 플러그인을 쓰지 않는다면 아래로 끌 수 있습니다.
   ```bash
   sed -i 's/^enableServerPlugins:.*/enableServerPlugins: false/' ~/SillyTavern/config.yaml
