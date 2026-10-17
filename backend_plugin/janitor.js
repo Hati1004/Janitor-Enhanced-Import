@@ -172,6 +172,25 @@ function stripHtml(s) {
     return String(s || '').replace(/<[^>]*>/g, '').trim();
 }
 
+// ── 대체 그리팅(alternate greetings) 추출 ──
+// JanitorAI 응답에서 그리팅 배열을 찾아 문자열 배열로 만든다.
+// 첫 번째 그리팅(first_mes)과 같은 내용이나 중복은 제거한다.
+function pickGreetings(src, firstMes) {
+    const names = ['alternate_greetings', 'alt_greetings', 'alternateGreetings', 'first_messages', 'greetings'];
+    for (const n of names) {
+        const v = src && src[n];
+        if (!Array.isArray(v)) continue;
+        const seen = new Set([stripHtml(firstMes)]);
+        const out = [];
+        for (const x of v) {
+            const t = stripHtml(typeof x === 'string' ? x : ((x && (x.text ?? x.message ?? x.content)) ?? ''));
+            if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+        }
+        if (out.length) return out;
+    }
+    return [];
+}
+
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
@@ -183,6 +202,12 @@ function init(router) {
     // 프론트엔드(index.js, 실제 브라우저)에서 이미 fetch해온 것을 그대로 받아 변환만 한다.
     // 대부분의 제작자가 비워두므로 기본값(빈 문자열/배열)만 채운다.
     function nativeToV2Card(apiData) {
+        const altGreetings = pickGreetings(apiData, apiData.first_message);
+        console.log(`[Janitor] 네이티브 대체 그리팅 ${altGreetings.length}개 감지`);
+        if (!altGreetings.length) {
+            const arrays = Object.keys(apiData).filter(k => Array.isArray(apiData[k])).map(k => `${k}[${apiData[k].length}]`);
+            console.log('[Janitor][DEBUG] 대체 그리팅 없음. 응답의 배열 필드:', arrays.join(', ') || '(없음)');
+        }
         return {
             spec: 'chara_card_v2',
             spec_version: '2.0',
@@ -202,7 +227,7 @@ function init(router) {
                 tags:                       apiData.custom_tags || apiData.tags || [],
                 creator:                    apiData.creator_name || '',
                 character_version:          '',
-                alternate_greetings:        [],
+                alternate_greetings:        altGreetings,
                 character_book:             null,
                 extensions:                 {},
             }
