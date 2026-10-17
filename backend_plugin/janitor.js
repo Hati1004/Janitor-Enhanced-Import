@@ -1,4 +1,5 @@
-// 위치: SillyTavern/plugins/janitor.js
+// 위치: SillyTavern/plugins/janitor.js  (PC 버전: 기존 janitor.js를 이 파일로 그대로 교체)
+// 참고: sharp가 설치돼 있으면 sharp로, 없으면 SillyTavern 내장 jimp(WASM)로 아바타를 변환한다.
 const fs   = require('fs');
 const path = require('path');
 const info = { id: 'janitor', name: 'JanitorAI Proxy', description: 'JannyAI 우회 추출 백엔드' };
@@ -182,48 +183,145 @@ function init(router) {
     // 서버(Node fetch)에서 직접 호출하면 토큰이 맞아도 403이 뜬다. 그래서 이 데이터는
     // 프론트엔드(index.js, 실제 브라우저)에서 이미 fetch해온 것을 그대로 받아 변환만 한다.
     // 대부분의 제작자가 비워두므로 기본값(빈 문자열/배열)만 채운다.
+    // ── 네이티브 응답을 읽기 위한 도우미 ─────────────────────────
+    // JanitorAI 응답의 필드명이 바뀌거나 한 겹 감싸져 와도 최대한 찾아낸다.
+    const isBlank = (v) => v === undefined || v === null
+        || (typeof v === 'string' && !v.trim())
+        || (Array.isArray(v) && v.length === 0)
+        || (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0);
+
+    function firstText(obj, names) {
+        for (const n of names) {
+            const v = obj?.[n];
+            if (typeof v === 'string' && v.trim()) return v;
+        }
+        return '';
+    }
+
+    function unwrapNative(apiData) {
+        if (apiData && (apiData.name || apiData.chat_name)) return apiData;
+        for (const k of ['character', 'data', 'bot', 'result']) {
+            const inner = apiData?.[k];
+            if (inner && typeof inner === 'object' && (inner.name || inner.chat_name)) return inner;
+        }
+        return apiData || {};
+    }
+
+    function pickGreetings(src) {
+        for (const n of ['alternate_greetings', 'alt_greetings', 'alternateGreetings', 'first_messages', 'greetings']) {
+            const v = src?.[n];
+            if (!Array.isArray(v)) continue;
+            const out = v.map(x => typeof x === 'string' ? x : (x?.text ?? x?.message ?? x?.content ?? ''))
+                         .map(stripHtml).filter(Boolean);
+            if (out.length) return out;
+        }
+        return [];
+    }
+
     function nativeToV2Card(apiData) {
+        const src = unwrapNative(apiData);
+
+        // 진단용: 실제로 어떤 필드가 얼마나 채워져 왔는지 Termux 콘솔에 남긴다.
+        const lens = {};
+        for (const k of Object.keys(src)) {
+            const v = src[k];
+            lens[k] = typeof v === 'string' ? v.length : (Array.isArray(v) ? `[${v.length}]` : typeof v);
+        }
+        console.log('[Janitor][DEBUG] 네이티브 응답 필드(길이):', JSON.stringify(lens));
+
+        // 주의: JanitorAI 네이티브 API는 description/personality 필드의 내용물이
+        // ST가 기대하는 것과 반대로 들어있다(description에 실제 성격/서사가,
+        // personality에 세팅 문구가 들어있는 경우가 확인됨). 그래서 교차 매핑한다.
+        // 단, personality 쪽이 비어 있으면 description을 ST 설명칸에 넣어 설명칸이 비지 않게 한다.
+        const jPersonality = stripHtml(firstText(src, ['personality']));
+        const jDescription = stripHtml(firstText(src, ['description']));
+        const jScenario    = stripHtml(firstText(src, ['scenario']));
+        const jFirst       = stripHtml(firstText(src, ['first_message', 'firstMessage', 'first_mes', 'greeting', 'initial_message']));
+        const jExample     = stripHtml(firstText(src, ['example_dialogs', 'exampleDialogs', 'mes_example', 'example_dialogues']));
+
+        // 정의 비공개(character definition is hidden) 판별:
+        // 성격/시나리오/첫 인사말/예시 대화가 전부 비어 있고 공개 설명(description)만 있는 경우.
+        // 이때 description은 "정의"가 아니라 작가가 공개 페이지에 쓴 소개글(제작자 메모)이므로,
+        // ST의 캐릭터 설명칸이 아니라 제작자 메모(creator_notes)로 보낸다.
+        // (설명칸을 비워 둬야 아래 외부 저장본(datacat/JannyAI) 보충도 정상 발동한다.)
+        const definitionHidden = !jPersonality && !jScenario && !jFirst && !jExample;
+
+        const creatorName = src.creator_name || src.creatorName || '';
+        const creatorLine = creatorName ? `JanitorAI 원작자: ${creatorName}` : '';
+        const creatorNotes = (definitionHidden && jDescription)
+            ? [creatorLine, jDescription].filter(Boolean).join('\n\n')
+            : creatorLine;
         return {
             spec: 'chara_card_v2',
             spec_version: '2.0',
             data: {
-                name:                       apiData.name || apiData.chat_name || '',
-                // 주의: JanitorAI 네이티브 API는 description/personality 필드의 내용물이
-                // ST가 기대하는 것과 반대로 들어있다(description에 실제 성격/서사가,
-                // personality에 세팅 문구가 들어있는 경우가 확인됨). 그래서 여기서 교차 매핑한다.
-                description:                stripHtml(apiData.personality),
-                personality:                stripHtml(apiData.description),
-                scenario:                   stripHtml(apiData.scenario),
-                first_mes:                  stripHtml(apiData.first_message),
-                mes_example:                stripHtml(apiData.example_dialogs),
-                creator_notes:              apiData.creator_name ? `JanitorAI 원작자: ${apiData.creator_name}` : '',
+                name:                       src.name || src.chat_name || '',
+                description:                definitionHidden ? '' : (jPersonality || jDescription),
+                personality:                (!definitionHidden && jPersonality) ? jDescription : '',
+                scenario:                   jScenario,
+                first_mes:                  jFirst,
+                mes_example:                jExample,
+                creator_notes:              creatorNotes,
                 system_prompt:              '',
                 post_history_instructions:  '',
-                tags:                       apiData.custom_tags || apiData.tags || [],
-                creator:                    apiData.creator_name || '',
+                tags:                       src.custom_tags || src.tags || [],
+                creator:                    creatorName,
                 character_version:          '',
-                alternate_greetings:        [],
+                alternate_greetings:        pickGreetings(src),
                 character_book:             null,
                 extensions:                 {},
             }
         };
     }
 
-    // 아바타(webp) → PNG 변환. sharp가 없으면 명확한 설치 안내와 함께 실패시킨다.
+    // ── 이미지 → PNG 변환 ─────────────────────────────────────────
+    // 1순위: sharp (깔려 있으면 빠름. 단, Termux/안드로이드에선 설치가 거의 안 됨)
+    // 2순위: ST가 이미 갖고 있는 jimp(WASM). 순수 JS/WASM이라 폰(Termux)에서도 추가 설치 없이 동작.
+    const PNG_SIG = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    let _jimpPromise = null;
+    function getJimp() {
+        if (!_jimpPromise) {
+            _jimpPromise = (async () => {
+                const { createJimp } = await import('@jimp/core');
+                const formats = [
+                    (await import('@jimp/wasm-webp')).default,
+                    (await import('@jimp/wasm-png')).default,
+                ];
+                try { formats.push((await import('@jimp/wasm-jpeg')).default); } catch (e) { /* jpeg 없으면 생략 */ }
+                return createJimp({ formats });
+            })();
+            _jimpPromise.catch(() => { _jimpPromise = null; });
+        }
+        return _jimpPromise;
+    }
+
+    async function toPngBuffer(inputBuf) {
+        // 이미 PNG면 변환 불필요
+        if (inputBuf.length > 8 && inputBuf.subarray(0, 8).equals(PNG_SIG)) return inputBuf;
+
+        try {
+            const sharp = require('sharp');
+            return await sharp(inputBuf).png().toBuffer();
+        } catch (e) {
+            console.log(`[Janitor] sharp 사용 불가(${e.code || e.message}) → ST 내장 jimp(WASM)로 변환합니다.`);
+        }
+
+        try {
+            const Jimp = await getJimp();
+            const img  = await Jimp.read(inputBuf);
+            return await img.getBuffer('image/png');
+        } catch (e) {
+            throw new Error(`이미지를 PNG로 변환하지 못했습니다 (${e.message}). 움직이는 webp 아바타이거나 ST 버전이 너무 낮을 수 있습니다(1.13+ 권장).`);
+        }
+    }
+
     async function fetchAvatarAsPng(avatarFileName) {
         if (!avatarFileName) throw new Error('네이티브 API 응답에 avatar 파일명이 없습니다.');
         const avatarUrl = `https://ella.janitorai.com/bot-avatars/${avatarFileName}?width=1200`;
         const res = await fetch(avatarUrl, { headers: BROWSER_HEADERS });
         if (!res.ok) throw new Error(`아바타 다운로드 실패 HTTP ${res.status}`);
         const inputBuf = Buffer.from(await res.arrayBuffer());
-
-        let sharp;
-        try {
-            sharp = require('sharp');
-        } catch (e) {
-            throw new Error('sharp 모듈이 설치되어 있지 않습니다. 플러그인 폴더(backend_plugin)에서 "npm install sharp" 실행 후 ST를 재시작하세요.');
-        }
-        return await sharp(inputBuf).png().toBuffer();
+        return await toPngBuffer(inputBuf);
     }
 
     // A. JannyAI API → PNG downloadUrl
@@ -261,6 +359,28 @@ function init(router) {
         return { downloadUrl: dlUrl, raw: data };
     }
 
+    // 네이티브 응답에 정의(설명/첫 인사말)가 비어 있을 때, datacat → JannyAI 순으로
+    // 저장된 카드 PNG를 받아 거기 임베드된 카드 데이터를 읽어온다.
+    async function fetchExternalCard(uuid) {
+        const sources = [['datacat', tryDatacat], ['JannyAI', tryJannyApi]];
+        for (const [label, getUrl] of sources) {
+            try {
+                const { downloadUrl } = await getUrl(uuid);
+                const r = await fetch(downloadUrl, { headers: BROWSER_HEADERS });
+                if (!r.ok) throw new Error(`PNG 다운로드 HTTP ${r.status}`);
+                const card = toV2Card(readCharaCard(Buffer.from(await r.arrayBuffer())));
+                if (card && (!isBlank(card.data.description) || !isBlank(card.data.first_mes))) {
+                    console.log(`[Janitor] ✅ ${label}에서 정의 데이터 확보`);
+                    return { card, source: label };
+                }
+                console.log(`[Janitor] ${label} 카드에도 정의가 비어 있음`);
+            } catch (e) {
+                console.log(`[Janitor] ${label} 실패: ${e.message}`);
+            }
+        }
+        return null;
+    }
+
     // E. 메인: PNG 추출
     // 참고: JanitorAI의 로어북(Scripts)과 datacat의 'core' 추출 경로는 모두
     // 로그인 세션(Cloudflare 포함) 인증이 필요해 서버 단독으로는 접근할 수 없는 것이
@@ -269,18 +389,36 @@ function init(router) {
         let avatarPngBuf = null;
         let source = 'unknown';
         let nativeCard = null;
+        const warnings = [];
 
         // 0. 프론트엔드가 이미 브라우저에서 fetch해온 네이티브 캐릭터 데이터가 있으면 그걸 사용.
         // (서버에서 직접 호출하면 Cloudflare 봇 감지에 막히므로, 반드시 브라우저 쪽에서 받아와야 함)
         if (nativeApiData) {
             try {
-                if (!nativeApiData.id) throw new Error('전달받은 데이터에 캐릭터 id가 없습니다.');
+                const nativeSrc = unwrapNative(nativeApiData);
+                if (!nativeSrc.id) throw new Error('전달받은 데이터에 캐릭터 id가 없습니다.');
                 nativeCard = nativeToV2Card(nativeApiData);
-                avatarPngBuf = await fetchAvatarAsPng(nativeApiData.avatar);
+                avatarPngBuf = await fetchAvatarAsPng(nativeSrc.avatar);
                 source = 'native';
                 console.log('[Janitor] ✅ 네이티브(브라우저 fetch) 데이터로 카드+아바타 확보 완료');
             } catch (e0) {
                 console.log(`[Janitor] 네이티브 데이터 처리 실패(${e0.message}), datacat/JannyAI로 폴백...`);
+            }
+        }
+
+        // 네이티브 응답에 설명/첫 인사말이 모두 비어 있으면 외부 저장본으로 빈칸을 채운다.
+        // (로그인 상태가 아니거나, 작가가 정의를 비공개로 해둔 경우 이런 응답이 올 수 있음)
+        if (nativeCard && isBlank(nativeCard.data.description) && isBlank(nativeCard.data.first_mes)) {
+            console.log('[Janitor] ⚠️ 네이티브 응답에 설명/첫 인사말이 비어 있음 → 외부 저장본으로 보충 시도');
+            const ext = await fetchExternalCard(uuid);
+            if (ext) {
+                for (const k of Object.keys(ext.card.data)) {
+                    if (isBlank(nativeCard.data[k]) && !isBlank(ext.card.data[k])) nativeCard.data[k] = ext.card.data[k];
+                }
+                source = `native+${ext.source}`;
+            }
+            if (isBlank(nativeCard.data.description) && isBlank(nativeCard.data.first_mes)) {
+                warnings.push('캐릭터 정의가 비공개인 것으로 보여 설명/첫 인사말이 비어 있습니다. 공개 소개글은 제작자 메모(Creator\'s Notes)에 넣어 두었습니다. 로그인 상태도 확인해 보세요.');
             }
         }
 
@@ -345,7 +483,8 @@ function init(router) {
 
         return {
             pngBuf,
-            charName: card.data.name || uuid
+            charName: card.data.name || uuid,
+            warnings
         };
     }
 
@@ -430,7 +569,7 @@ function init(router) {
             if (!m) return res.status(400).json({ success: false, error: 'URL에서 UUID를 찾을 수 없습니다.' });
             const uuid = m[0];
 
-            const { pngBuf, charName } = await buildFinalPng(uuid, url, nativeApiData);
+            const { pngBuf, charName, warnings } = await buildFinalPng(uuid, url, nativeApiData);
 
             // ST 1.12+ 멀티유저 구조: req.user.directories.characters 가
             // 현재 로그인한 유저의 캐릭터 폴더 절대경로를 제공한다.
@@ -457,7 +596,8 @@ function init(router) {
             res.json({
                 success:  true,
                 charName: charName,
-                fileName: path.basename(finalPath)
+                fileName: path.basename(finalPath),
+                warnings: warnings || []
             });
 
         } catch (err) {
