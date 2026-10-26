@@ -173,6 +173,44 @@ function stripHtml(s) {
     return String(s || '').replace(/<[^>]*>/g, '').trim();
 }
 
+// ── JanitorAI 자동 크레딧 문구 제거 ───────────────────────────────
+// 재니터가 캐릭터 텍스트 끝에 붙이는 "created by 제작자 2026© on janitorai.com" 줄을
+// 설명/성격/시나리오/첫 인사말/대체 인사말에서 지운다. (제작자 이름은 제작자 메모에
+// "JanitorAI 원작자: 이름" 으로 따로 남기므로 정보는 사라지지 않는다.)
+// 지우고 싶지 않으면 아래 값을 false 로 바꾸면 된다.
+const STRIP_JANITOR_CREDIT = true;
+const CREDIT_TEST_RE = /created\s+by\b[^\n]{0,80}?\bon\s+janitorai\.com/i;
+const CREDIT_RE      = /[ \t]*created\s+by\b[^\n]{0,80}?\bon\s+janitorai\.com\.?[ \t]*/gi;
+
+function cleanCredit(s) {
+    if (typeof s !== 'string' || !CREDIT_TEST_RE.test(s)) return { text: s, n: 0 };
+    let n = 0;
+    const text = s.replace(CREDIT_RE, () => { n++; return ''; })
+        .replace(/[ \t]+$/gm, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    return { text, n };
+}
+
+function stripJanitorCredit(card) {
+    if (!STRIP_JANITOR_CREDIT || !card || !card.data) return;
+    const d = card.data;
+    let total = 0;
+    const where = [];
+    for (const k of ['description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions']) {
+        const r = cleanCredit(d[k]);
+        if (r.n) { d[k] = r.text; total += r.n; where.push(`${k}×${r.n}`); }
+    }
+    if (Array.isArray(d.alternate_greetings)) {
+        d.alternate_greetings = d.alternate_greetings.map((g, i) => {
+            const r = cleanCredit(g);
+            if (r.n) { total += r.n; where.push(`alternate_greetings[${i}]×${r.n}`); }
+            return r.text;
+        });
+    }
+    if (total) console.log(`[Janitor] 재니터 크레딧 문구 ${total}곳 제거 (${where.join(', ')})`);
+}
+
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
@@ -484,6 +522,7 @@ function init(router) {
             }
         }
         console.log(`[Janitor] 카드 변환: spec=${card.spec} v=${card.spec_version} (소스: ${source})`);
+        stripJanitorCredit(card);
 
         // V2 카드를 PNG에 다시 임베드 (chara + ccv3 둘 다 교체하여 충돌 방지)
         const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
