@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JanitorAI → SillyTavern Bridge
 // @namespace    jai-st-bridge
-// @version      1.7.1
+// @version      1.7.2
 // @description  janitorai.com 캐릭터/로어북 페이지에서 데이터를 same-origin으로 가져와 로컬 SillyTavern 플러그인으로 바로 전송합니다. (토큰 자동 감지)
 // @match        https://janitorai.com/*
 // @run-at       document-start
@@ -607,10 +607,30 @@
     // (예전 버전은 .cm-editor 에서 찾았는데 CM6 의 인스턴스는 .cm-content 에 붙어 있고,
     //  샌드박스에서는 페이지 쪽 프로퍼티가 안 보여서 항상 실패했다.)
     function getCmDocText(contentEl) {
-        const dv = contentEl.cmView;
-        const view = dv?.view || dv?.editorView;
-        const doc = view?.state?.doc;
-        return doc && typeof doc.toString === 'function' ? doc.toString() : null;
+        // 최신 CM6(@codemirror/view 6.3x~)는 cmView 대신 cmTile 을 쓰고,
+        // Firefox 샌드박스에서는 expando 프로퍼티가 wrappedJSObject 쪽에만 보인다.
+        const holders = [contentEl, contentEl.wrappedJSObject].filter(Boolean);
+        const seen = new Set();
+        const findDoc = (o, depth) => {
+            if (!o || (typeof o !== 'object' && typeof o !== 'function') || seen.has(o) || depth > 3) return null;
+            seen.add(o);
+            try {
+                const doc = o.state?.doc;
+                if (doc && typeof doc.toString === 'function' && typeof doc.lines === 'number') return doc;
+                for (const k of ['view', 'editorView', 'root', 'parent', 'docView', 'tile']) {
+                    const r = findDoc(o[k], depth + 1);
+                    if (r) return r;
+                }
+            } catch (e) { /* 접근 불가 프로퍼티 무시 */ }
+            return null;
+        };
+        for (const h of holders) {
+            for (const key of ['cmView', 'cmTile']) {
+                const doc = findDoc(h[key], 0);
+                if (doc) return doc.toString();
+            }
+        }
+        return null;
     }
 
     function extractEntriesFromEditor() {
@@ -681,6 +701,15 @@
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+    // 실제로 스크롤되는 가장 가까운 바깥 요소 (없으면 문서 전체)
+    function findScrollParent(el) {
+        for (let p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+            const oy = getComputedStyle(p).overflowY;
+            if (/(auto|scroll|overlay)/.test(oy) && p.scrollHeight > p.clientHeight + 2) return p;
+        }
+        return document.scrollingElement || document.documentElement;
+    }
+
     // ── 백업 3: 스크롤을 자동으로 움직이며 가려진 줄까지 전부 긁어모은다 ──
     // CM6 는 아직 렌더링 안 된 줄의 높이를 "추정"하다가 렌더링되면서 실제 값으로 바꾸기 때문에,
     // 예전처럼 offsetTop 으로 줄을 구분하면 같은 줄이 여러 번 들어가거나 순서가 꼬여서
@@ -707,34 +736,76 @@
                 }
             };
 
+            // 에디터 자체가 스크롤되지 않고(높이 자동) 페이지가 스크롤되는 레이아웃이면,
+            // CM6 는 "화면에 보이는 영역"만 그리므로 페이지 쪽을 스크롤해야 나머지 줄이 렌더링된다.
+            const innerScrollable = scroller.scrollHeight > scroller.clientHeight + 2;
+            const outer = findScrollParent(editorEl);
+            const outerIsDoc = outer === document.scrollingElement || outer === document.documentElement || outer === document.body;
+            const outerOrigTop = outer.scrollTop;
+            const outerOrigBehavior = outer.style.scrollBehavior;
+            const htmlOrigBehavior = document.documentElement.style.scrollBehavior;
+            outer.style.scrollBehavior = 'auto';
+            document.documentElement.style.scrollBehavior = 'auto';
+            console.log(`[JAI-Bridge][진단] 에디터 내부 스크롤 ${innerScrollable ? '가능' : '불가(페이지 스크롤 사용)'}, 바깥 스크롤 요소: ${outerIsDoc ? 'document' : outer.tagName + '.' + outer.className}`);
+
             const originalScrollTop = scroller.scrollTop;
             const originalBehavior  = scroller.style.scrollBehavior;
-            // 사이트 CSS가 smooth 스크롤이면 위치가 천천히 바뀌어서 "더 안 움직인다"고 오판해 중간에 끊겼다.
             scroller.style.scrollBehavior = 'auto';
-            scroller.scrollTop = 0;
-            await sleep(200);
 
-            let lastTop = -1, stuck = 0, bottomHits = 0;
-            for (let guard = 0; guard < 6000; guard++) {
-                snapshot();
-                const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-                if (atBottom) {
-                    // CM6 는 아직 안 그려진 줄 높이를 추정하다가 그리면서 scrollHeight 가 늘어난다.
-                    // 바닥에 닿았다고 바로 끝내지 말고, 잠깐 기다렸다 여러 번 다시 확인한다.
-                    if (++bottomHits >= 4) break;
-                    await sleep(200);
-                    continue;
+            const outerTopOnScreen = () => outerIsDoc ? 0 : outer.getBoundingClientRect().top;
+            const outerViewH = () => outerIsDoc ? window.innerHeight : outer.clientHeight;
+            const editorTopAbs = () => outer.scrollTop + editorEl.getBoundingClientRect().top - outerTopOnScreen();
+
+            // 1단계: 바깥(페이지)을 에디터 맨 위부터 맨 아래까지 훑는다.
+            {
+                let y = Math.max(0, editorTopAbs());
+                let bottomHits = 0;
+                for (let guard = 0; guard < 6000; guard++) {
+                    outer.scrollTop = y;
+                    await sleep(120);
+                    snapshot();
+                    const bottomAbs = editorTopAbs() + editorEl.getBoundingClientRect().height;
+                    if (outer.scrollTop + outerViewH() >= bottomAbs - 2) {
+                        if (++bottomHits >= 3) break;
+                        await sleep(200);
+                        continue;
+                    }
+                    bottomHits = 0;
+                    const next = y + Math.max(40, outerViewH() * 0.5);
+                    if (next === y) break;
+                    y = next;
                 }
-                bottomHits = 0;
-                scroller.scrollTop += Math.max(40, scroller.clientHeight * 0.5);
-                await sleep(80);
-                if (scroller.scrollTop === lastTop) { if (++stuck >= 8) break; await sleep(150); } else stuck = 0;
-                lastTop = scroller.scrollTop;
+            }
+
+            // 2단계: 에디터 내부가 스크롤되는 경우 내부도 훑는다. (바깥은 에디터가 보이는 위치로 맞춰 둔다)
+            if (innerScrollable) {
+                outer.scrollTop = Math.max(0, editorTopAbs());
+                scroller.scrollTop = 0;
+                await sleep(200);
+                let lastTop = -1, stuck = 0, bottomHits = 0;
+                for (let guard = 0; guard < 6000; guard++) {
+                    snapshot();
+                    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+                    if (atBottom) {
+                        // CM6 는 아직 안 그려진 줄 높이를 추정하다가 그리면서 scrollHeight 가 늘어난다.
+                        if (++bottomHits >= 4) break;
+                        await sleep(200);
+                        continue;
+                    }
+                    bottomHits = 0;
+                    scroller.scrollTop += Math.max(40, scroller.clientHeight * 0.5);
+                    await sleep(80);
+                    if (scroller.scrollTop === lastTop) { if (++stuck >= 8) break; await sleep(150); } else stuck = 0;
+                    lastTop = scroller.scrollTop;
+                }
             }
             await sleep(150);
             snapshot(); // 맨 아래 한 번 더
             scroller.scrollTop = originalScrollTop;
             scroller.style.scrollBehavior = originalBehavior;
+            outer.scrollTop = outerOrigTop;
+            outer.style.scrollBehavior = outerOrigBehavior;
+            document.documentElement.style.scrollBehavior = htmlOrigBehavior;
 
             let text, info;
             if (byNumber.size) {
