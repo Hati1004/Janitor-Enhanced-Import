@@ -211,6 +211,30 @@ function stripJanitorCredit(card) {
     if (total) console.log(`[Janitor] 재니터 크레딧 문구 ${total}곳 제거 (${where.join(', ')})`);
 }
 
+// ── 첫 인사말(first_mes) 중복 제거 ───────────────────────────────────
+// JanitorAI/외부 저장본(datacat·JannyAI)은 대체 인사말 배열에 첫 인사말을 또 넣어 주는 경우가 있다.
+// 그대로 ST에 넣으면 첫 인사말이 스와이프 첫 칸과 두 번째 칸에 똑같이 두 번 나온다.
+// first_mes와 같은 내용, 그리고 대체 인사말끼리 겹치는 항목을 제거한다. (공백/줄바꿈 차이는 무시)
+const DEDUPE_GREETINGS = true;
+const normGreeting = (s) => String(s ?? '').replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim();
+
+function dedupeGreetings(card) {
+    if (!DEDUPE_GREETINGS || !card || !card.data || !Array.isArray(card.data.alternate_greetings)) return;
+    const d = card.data;
+    const seen = new Set();
+    const first = normGreeting(d.first_mes);
+    if (first) seen.add(first);
+    const before = d.alternate_greetings.length;
+    d.alternate_greetings = d.alternate_greetings.filter((g) => {
+        const k = normGreeting(g);
+        if (!k || seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+    const removed = before - d.alternate_greetings.length;
+    if (removed) console.log(`[Janitor] 중복/빈 인사말 ${removed}개 제거 (대체 인사말 ${before} → ${d.alternate_greetings.length}개)`);
+}
+
 function init(router) {
     console.log("================================================");
     console.log("[Janitor 플러그인] 🟢 백엔드 서버 완벽 로드 완료!");
@@ -523,6 +547,7 @@ function init(router) {
         }
         console.log(`[Janitor] 카드 변환: spec=${card.spec} v=${card.spec_version} (소스: ${source})`);
         stripJanitorCredit(card);
+        dedupeGreetings(card);
 
         // V2 카드를 PNG에 다시 임베드 (chara + ccv3 둘 다 교체하여 충돌 방지)
         const newB64 = Buffer.from(JSON.stringify(card), 'utf8').toString('base64');
