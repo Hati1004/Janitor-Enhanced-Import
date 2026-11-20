@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         JanitorAI → SillyTavern Bridge
 // @namespace    jai-st-bridge
-// @version      1.7.2
+// @version      1.7.3
 // @description  janitorai.com 캐릭터/로어북 페이지에서 데이터를 same-origin으로 가져와 로컬 SillyTavern 플러그인으로 바로 전송합니다. (토큰 자동 감지)
 // @match        https://janitorai.com/*
+// @match        https://jani.com/*
+// @match        https://*.jani.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
@@ -83,7 +85,7 @@
         if (ev.origin !== location.origin || !d || typeof d.__jaiEiToken !== 'string') return;
         let host = '';
         try { host = new URL(d.__url, location.href).hostname; } catch (e) { /* 무시 */ }
-        if (!/(^|\.)janitorai\.com$/i.test(host)) return; // 다른 서비스 토큰은 무시
+        if (!/(^|\.)(janitorai\.com|jani\.com)$/i.test(host)) return; // 다른 서비스 토큰은 무시
         const t = d.__jaiEiToken.trim();
         if (t && t !== GM_getValue(TOKEN_KEY, '')) {
             GM_setValue(TOKEN_KEY, t);
