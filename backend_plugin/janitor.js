@@ -179,8 +179,8 @@ function stripHtml(s) {
 // "JanitorAI 원작자: 이름" 으로 따로 남기므로 정보는 사라지지 않는다.)
 // 지우고 싶지 않으면 아래 값을 false 로 바꾸면 된다.
 const STRIP_JANITOR_CREDIT = true;
-const CREDIT_TEST_RE = /created\s+by\b[^\n]{0,80}?\bon\s+janitorai\.com/i;
-const CREDIT_RE      = /[ \t]*created\s+by\b[^\n]{0,80}?\bon\s+janitorai\.com\.?[ \t]*/gi;
+const CREDIT_TEST_RE = /created\s+by\b[^\n]{0,80}?\bon\s+(?:janitorai|jani)\.com/i;
+const CREDIT_RE      = /[ \t]*created\s+by\b[^\n]{0,80}?\bon\s+(?:janitorai|jani)\.com\.?[ \t]*/gi;
 
 function cleanCredit(s) {
     if (typeof s !== 'string' || !CREDIT_TEST_RE.test(s)) return { text: s, n: 0 };
